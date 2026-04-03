@@ -12,7 +12,7 @@ LANC protocol: http://www.boehmel.de/lanc.htm
 // GLOBAL
 #define ledON (VPORTE.OUT = VPORTE.IN |= B00000100)           // Set digital pin 13 (PE2)
 #define ledOFF (VPORTE.OUT = VPORTE.IN |= B11111011)          // Clear digital pin 13 (PE2)
-#define lancRepeats 4                        // Repeat LANC command (4 frames default)
+#define lancRepeats 25                        // Repeat LANC command (4 frames default)
 #define dbgPinON (VPORTE.OUT = VPORTE.IN |= B00000010)        // Set digital pin 12 (PE1)
 #define dbgPinOFF (VPORTE.OUT = VPORTE.IN &= B11111101)       // Clear digital pin 12 (PE1)
 
@@ -143,12 +143,12 @@ void loop() {
 
  noInterrupts();                                 // Disable interrupts for time-critical jitter-free bit-banging
 
- while (cam1LancPinREAD) {  }                        // Wait for the falling edge indicating the begin of the start bit
+ while (cam1LancPinREAD) {  }                    // Wait for the falling edge indicating the begin of the start bit
  
  ledON;                                          // LED indicator on = LANC message start
-
+//  if(repeats != 0) {
+//   Serial.println(repeats); }
  for (int bytenr = 0 ; bytenr<8 ; bytenr++) {    // Process 8-byte frame
-  dbgPinOFF;                                     // Turn debug pin OFF  
   delayMicroseconds(bitDura-4);                  // Wait start bit duration at the beginning of a byte
   for (int bitnr = 0 ; bitnr<8 ; bitnr++) {      // Process 8 bits
     if (bytenr<2 && repeats) {                   // Output data (if available) during the first two bytes
@@ -191,24 +191,24 @@ boolean hexchartobitarray() {
 
  int byte1, byte2;
  
-Serial.println("Input String:");
-Serial.println(inString);
+//Serial.println("Input String:");
+//Serial.println(inString);
 
  
  for (int i=0 ; i<4 ; i++ ) {
   if (!(isHexadecimalDigit(inString[i]))) { 
-    Serial.println("isHexadecimalDigit() returned 0");
-    Serial.println("Length of Input String:");
-    Serial.println(i+1);
+    //Serial.println("isHexadecimalDigit() returned 0");
+    //Serial.println("Length of Input String:");
+    //Serial.println(i+1);
     return 0; }
  }
 
  byte1 = (hexchartoint(inString[0]) << 4) + hexchartoint(inString[1]);
  byte2 = (hexchartoint(inString[2]) << 4) + hexchartoint(inString[3]);
 
-Serial.println("Characters received:");
-Serial.println(byte1, HEX);
-Serial.println(byte2, HEX);
+//Serial.println("Characters received:");
+//Serial.println(byte1, HEX);
+//Serial.println(byte2, HEX);
 
  for (int i=0 ; i<8 ; i++) {  lancCmd[i] = bitRead(byte1,i); }
  for (int i=0 ; i<8 ; i++) {  lancCmd[i + 8] = bitRead(byte2,i); }
@@ -216,6 +216,35 @@ Serial.println(byte2, HEX);
  return 1;
 }
 
+boolean hexchartobitarray2() {
+ // This function converts the hex char LANC command and fills the lancCmd array with the bits in LSB-first order
+
+ int byte1, byte2;
+ 
+//Serial.println("Input String:");
+//Serial.println(inString);
+
+ 
+ for (int i=0 ; i<4 ; i++ ) {
+  if (!(isHexadecimalDigit(inString[i]))) { 
+    //Serial.println("isHexadecimalDigit() returned 0");
+    //Serial.println("Length of Input String:");
+    //Serial.println(i+1);
+    return 0; }
+ }
+
+ byte1 = (hexchartoint(inString[0]) << 4) + hexchartoint(inString[1]);
+ byte2 = (hexchartoint(inString[2]) << 4) + hexchartoint(inString[3]);
+
+//Serial.println("Characters received:");
+//Serial.println(byte1, HEX);
+//Serial.println(byte2, HEX);
+
+ for (int i=0 ; i<8 ; i++) {  lancCmd[i] = bitRead(byte1,i); }
+ for (int i=0 ; i<8 ; i++) {  lancCmd[i + 8] = bitRead(byte2,i); }
+ 
+ return 1;
+}
 
 int hexchartoint(char hexchar) {
  switch (hexchar) {
