@@ -7,18 +7,20 @@ Based on Arduino code by L. Rosén: https://projecthub.arduino.cc/L-Rosen/9b5d02
 LANC protocol: http://www.boehmel.de/lanc.htm
 */
 
-// LANC in: pin 3, LANC out: pin 4
 // Use ATMEGA4809 native registers (direct I/O) on Arduino Nano Every!
 
 // GLOBAL
 #define ledON (VPORTE.OUT = VPORTE.IN |= B00000100)           // Set digital pin 13 (PE2)
 #define ledOFF (VPORTE.OUT = VPORTE.IN |= B11111011)          // Clear digital pin 13 (PE2)
 #define lancRepeats 4                        // Repeat LANC command (4 frames default)
+#define dbgPinON (VPORTE.OUT = VPORTE.IN |= B00000010)        // Set digital pin 12 (PE1)
+#define dbgPinOFF (VPORTE.OUT = VPORTE.IN &= B11111101)       // Clear digital pin 12 (PE1)
+
 
 // CAMERA 1 
-#define cam1CmdPinON (VPORTA.OUT = VPORTA.IN |= B00000001)    // Set digital pin 2 (PA0)
-#define cam1CmdPinOFF (VPORTA.OUT = VPORTA.IN &= B11111110)   // Clear digital pin 2 (PA0)
-#define cam1LancPinREAD (VPORTF.IN &= B00100000)              // Read digital pin 3 (PF5)
+#define cam1CmdPinON (VPORTA.OUT = VPORTA.IN |= B00000001)   // Set digital pin 2 (PA0)
+#define cam1CmdPinOFF (VPORTA.OUT = VPORTA.IN &= B11111110)  // Clear digital pin 2 (PA0)
+#define cam1LancPinREAD (VPORTF.IN &= B00100000)             // Read digital pin 3 (PF5)
 #define cam1UpPinON (VPORTE.OUT = VPORTE.IN |= B00000001)    // Set digital pin 11 (PE0)
 #define cam1UpPinOFF (VPORTE.OUT = VPORTE.IN &= B11111110)   // Clear digital pin 11 (PE0)
 #define cam1DnPinON (VPORTB.OUT = VPORTB.IN |= B00000010)    // Set digital pin 10 (PB1)
@@ -58,6 +60,8 @@ LANC protocol: http://www.boehmel.de/lanc.htm
 // Tip -- White
 // Ring -- Red
 // Sleeve -- Black
+// Note: Tip and Ring colors are juxtaposed on some teast leads
+
 // LANC commands:
 // Zoom In (Tele):
 // Slowest: 28 00
@@ -78,49 +82,52 @@ char inString[5];
 char outString[17];
 boolean strComplete = false;
 boolean lancCmd[16];
+//boolean lancCmd[16] = {false,false,true,false,true,false,false,false,false,true,true,true,true,false,false,false};
 unsigned long time;
 
 void setup() {
 VPORTE.DIR |= B00000100;    // Config ledPin as output (high)
+VPORTE.DIR |= B00000010;    // Config dbgPin as output (high)
+dbgPinOFF; // Clear debug pin
 
 // CAMERA 1
 VPORTA.DIR |= B00000001;    // Config cam1CmdPin as output (high)
 cam1CmdPinOFF;              // Clear Camera 1 LANC control pin (LANC line becomes high)
 VPORTF.DIR &= B11011111;    // Config cam1LancPin as input (low)
 VPORTE.DIR |= B00000001;    // Config cam1UpPin as output (high) 
-cam1UpPinOFF                // Clear Camera 1 UP control pin    
+cam1UpPinOFF;               // Clear Camera 1 UP control pin    
 VPORTB.DIR |= B00000010;    // Config cam1DnPin as output (high)
-cam1DnPinOFF                // Clear Camera 1 DN control pin 
+cam1DnPinOFF;               // Clear Camera 1 DN control pin 
 VPORTB.DIR |= B00000001;    // Config cam1RPin as output (high)
-cam1RPinOFF                 // Clear Camera 1 R control pin
+cam1RPinOFF;                // Clear Camera 1 R control pin
 VPORTE.DIR |= B00001000;    // Config cam1LPin as output (high) 
-cam1LPinOFF                 // Clear Camera 1 L control pin
+cam1LPinOFF;                // Clear Camera 1 L control pin
 
 // CAMERA 2
 VPORTC.DIR |= B00010000;    // Config cam2CmdPin as output (high)
 cam2CmdPinOFF;              // Clear Camera 2 LANC control pin (LANC line becomes high)
 VPORTB.DIR &= B11111011;    // Config cam2LancPin as input (low)
 VPORTD.DIR |= B00001000;    // Config cam2UpPin as output (high) 
-cam2UpPinOFF                // Clear Camera 2 UP control pin    
+cam2UpPinOFF;               // Clear Camera 2 UP control pin    
 VPORTD.DIR |= B00000100;    // Config cam2DnPin as output (high)
-cam2DnPinOFF                // Clear Camera 2 DN control pin 
+cam2DnPinOFF;               // Clear Camera 2 DN control pin 
 VPORTD.DIR |= B00000010;    // Config cam2RPin as output (high)
-cam2RPinOFF                 // Clear Camera 2 R control pin
+cam2RPinOFF;                // Clear Camera 2 R control pin
 VPORTD.DIR |= B00000001;    // Config cam2LPin as output (high) 
-cam2LPinOFF                 // Clear Camera 2 L control pin
+cam2LPinOFF;                // Clear Camera 2 L control pin
 
 // CAMERA 3
 VPORTF.DIR |= B00010000;    // Config cam3CmdPin as output (high)
 cam3CmdPinOFF;              // Clear Camera 3 LANC control pin (LANC line becomes high)
 VPORTA.DIR &= B11111101;    // Config cam3LancPin as input (low)
 VPORTA.DIR |= B00000100;    // Config cam3UpPin as output (high) 
-cam3UpPinOFF                // Clear Camera 3 UP control pin    
+cam3UpPinOFF;               // Clear Camera 3 UP control pin    
 VPORTA.DIR |= B00001000;    // Config cam3DnPin as output (high)
-cam3DnPinOFF                // Clear Camera 3 DN control pin 
+cam3DnPinOFF;               // Clear Camera 3 DN control pin 
 VPORTD.DIR |= B00010000;    // Config cam3RPin as output (high)
-cam3RPinOFF                 // Clear Camera 3 R control pin
+cam3RPinOFF;                // Clear Camera 3 R control pin
 VPORTD.DIR |= B00100000;    // Config cam3LPin as output (high) 
-cam3LPinOFF                 // Clear Camera 3 L control pin
+cam3LPinOFF;                // Clear Camera 3 L control pin
 
 Serial.begin(115200);       // Start serial port  
 Serial.println("Arduino LANC to USB-serial interface v1.0");
@@ -139,8 +146,9 @@ void loop() {
  while (cam1LancPinREAD) {  }                        // Wait for the falling edge indicating the begin of the start bit
  
  ledON;                                          // LED indicator on = LANC message start
-     
+
  for (int bytenr = 0 ; bytenr<8 ; bytenr++) {    // Process 8-byte frame
+  dbgPinOFF;                                     // Turn debug pin OFF  
   delayMicroseconds(bitDura-4);                  // Wait start bit duration at the beginning of a byte
   for (int bitnr = 0 ; bitnr<8 ; bitnr++) {      // Process 8 bits
     if (bytenr<2 && repeats) {                   // Output data (if available) during the first two bytes
@@ -153,11 +161,11 @@ void loop() {
   }
  cam1CmdPinOFF;
  delayMicroseconds(halfbitDura-10);              // Make sure to be in the stop bit before waiting for next byte; small delay adjust for sending serial data
- Serial.write(lancByte);                         // Send lancByte through serial port while waiting for next start bit
+ //Serial.write(lancByte);                         // Send lancByte through serial port while waiting for next start bit
  if (bytenr<7) { while (cam1LancPinREAD) {  } }      // Wait as long as the LANC line is high until the next start bit EXCEPT at end of frame
  }
  
- Serial.write(10);                               // Write line feed (0xA) to serial port after frame
+ //Serial.write(10);                               // Write line feed (0xA) to serial port after frame
 
  if(repeats>0) { repeats--; }                    // If a LANC command was sent in this frame, decrease the send "queue"; nothing is sent if repeats is 0
 
@@ -168,7 +176,7 @@ void loop() {
    inChar = (char)Serial.read();                 // Get the new byte
    inString[strPointer++] = inChar;                                 // Add it to the input string
    if ((inChar == '\n') || (inChar == '\r') || (strPointer > 4)) {  // If new character is a line feed, carriage return or 4 bytes were received, prepare LANC message
-   Serial.println("Character received");
+   //Serial.println("Character received");
      strPointer = 0;
      if(hexchartobitarray()) { repeats = lancRepeats; }             // Convert input string and set LANC commands "queue" (number of frames to repeat command)
      for (int i=0 ; i<5 ; i++) { inString[i] = 0; }                 // Reset input string (optional cleanup)
@@ -183,9 +191,15 @@ boolean hexchartobitarray() {
 
  int byte1, byte2;
  
+Serial.println("Input String:");
+Serial.println(inString);
+
+ 
  for (int i=0 ; i<4 ; i++ ) {
   if (!(isHexadecimalDigit(inString[i]))) { 
     Serial.println("isHexadecimalDigit() returned 0");
+    Serial.println("Length of Input String:");
+    Serial.println(i+1);
     return 0; }
  }
 
