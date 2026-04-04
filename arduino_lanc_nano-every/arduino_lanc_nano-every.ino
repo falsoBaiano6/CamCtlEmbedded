@@ -15,7 +15,9 @@ LANC protocol: http://www.boehmel.de/lanc.htm
 #define lancRepeats 25                        // Repeat LANC command (4 frames default)
 #define dbgPinON (VPORTE.OUT = VPORTE.IN |= B00000010)        // Set digital pin 12 (PE1)
 #define dbgPinOFF (VPORTE.OUT = VPORTE.IN &= B11111101)       // Clear digital pin 12 (PE1)
-
+#define rxAckSTX "FE"                                         // "Received Start-Of-Text code"
+#define rxAckCh  "AA"                                         // "Received Character code"
+#define rxAckETX "EF"                                         // "Received End-Of-Text code"     
 
 // CAMERA 1 
 #define cam1CmdPinON (VPORTA.OUT = VPORTA.IN |= B00000001)   // Set digital pin 2 (PA0)
@@ -78,12 +80,13 @@ int repeats = 0;
 byte lancByte = 0;
 byte strPointer = 0;
 char inChar;
-char inString[5];
-char outString[17];
 boolean strComplete = false;
 boolean lancCmd[16];
 //boolean lancCmd[16] = {false,false,true,false,true,false,false,false,false,true,true,true,true,false,false,false};
 unsigned long time;
+const byte numChars = 5;
+char inString[numChars];
+boolean newData = false;
 
 void setup() {
 VPORTE.DIR |= B00000100;    // Config ledPin as output (high)
@@ -129,7 +132,8 @@ cam3RPinOFF;                // Clear Camera 3 R control pin
 VPORTD.DIR |= B00100000;    // Config cam3LPin as output (high) 
 cam3LPinOFF;                // Clear Camera 3 L control pin
 
-Serial.begin(115200);       // Start serial port  
+//Serial.begin(115200);       // Start serial port
+Serial.begin(115200);  
 Serial.println("Arduino LANC to USB-serial interface v1.0");
 }
 
@@ -172,8 +176,17 @@ void loop() {
  ledOFF;                                         // LED indicator on = LANC message end
  interrupts();                                   // Re-enable interrupts
 
+ //recvOriginal();
+ recvWithStartEndMarkers();
+ newData = false;
+
+}
+
+void recvOriginal() {
+
  while (Serial.available()) {                    // Read serial port input beween frames
    inChar = (char)Serial.read();                 // Get the new byte
+   Serial.println(inChar);
    inString[strPointer++] = inChar;                                 // Add it to the input string
    if ((inChar == '\n') || (inChar == '\r') || (strPointer > 4)) {  // If new character is a line feed, carriage return or 4 bytes were received, prepare LANC message
    //Serial.println("Character received");
@@ -185,38 +198,68 @@ void loop() {
 
 }
 
-
-boolean hexchartobitarray() {
- // This function converts the hex char LANC command and fills the lancCmd array with the bits in LSB-first order
-
- int byte1, byte2;
+boolean recvWithStartEndMarkers() {
+    static boolean recvInProgress = false;
+    static byte ndx = 0;
+    char startMarker = '<';
+    char endMarker = '>';
+    char rc;
  
-//Serial.println("Input String:");
-//Serial.println(inString);
+    while (Serial.available() > 0 && newData == false) {
+        rc = Serial.read();
+        //delay(1);
+        //Serial.println(rc);
 
- 
- for (int i=0 ; i<4 ; i++ ) {
-  if (!(isHexadecimalDigit(inString[i]))) { 
-    //Serial.println("isHexadecimalDigit() returned 0");
-    //Serial.println("Length of Input String:");
-    //Serial.println(i+1);
-    return 0; }
- }
+        if (recvInProgress == true) {
 
- byte1 = (hexchartoint(inString[0]) << 4) + hexchartoint(inString[1]);
- byte2 = (hexchartoint(inString[2]) << 4) + hexchartoint(inString[3]);
+            if (rc != endMarker) {
+                inString[ndx] = rc;
+                ndx++;
+                if (ndx >= numChars) {
+                    ndx = numChars - 1;
+                }
+                Serial.println(rxAckCh);
+            }
+            else {
+                //Serial.println("recd end marker");
+                //inString[ndx] = '\0'; // terminate the string
+                // re-initialize variables
+                recvInProgress = false;
+                ndx = 0;
+                newData = true;
+                //Serial.println("inString:");
+                //Serial.println(inString);
+                Serial.println(rxAckETX);
+                if(hexchartobitarray()) { 
+                  repeats = lancRepeats; } // Convert input string and set LANC commands "queue" (number of frames to repeat command)
+                  for (int i=0 ; i<numChars ; i++) { inString[i] = 0; }                 // Reset input string (optional cleanup)
 
-//Serial.println("Characters received:");
-//Serial.println(byte1, HEX);
-//Serial.println(byte2, HEX);
+                  // Serial buffer flushed:
+                  flushSerialBuffer();
 
- for (int i=0 ; i<8 ; i++) {  lancCmd[i] = bitRead(byte1,i); }
- for (int i=0 ; i<8 ; i++) {  lancCmd[i + 8] = bitRead(byte2,i); }
- 
- return 1;
+                  return(1);
+                
+
+            }
+        }
+
+        else if (rc == startMarker) {
+            recvInProgress = true;
+            Serial.println(rxAckSTX);
+        }
+    }
 }
 
-boolean hexchartobitarray2() {
+void flushSerialBuffer() {
+  // flush the serial input buffer
+  while (Serial.available() > 0) {
+  Serial.read();
+  }
+  Serial.println("Serial Buffer Flushed!");
+}
+
+
+boolean hexchartobitarray() {
  // This function converts the hex char LANC command and fills the lancCmd array with the bits in LSB-first order
 
  int byte1, byte2;
