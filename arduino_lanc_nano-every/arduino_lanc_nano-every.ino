@@ -146,6 +146,7 @@ boolean recvHostListeningCode() {
     char rc;
     while (!(Serial.available())) {};
     rc = Serial.read();
+    Serial1.write(rc); //Send RX0 byte to TX1
     return (rc == HostListeningCode) ? 1 : 0;
 }
 
@@ -217,7 +218,6 @@ boolean recvWithStartEndMarkers() {
  
     while (Serial.available() > 0 && newData == false) {
         rc = Serial.read();
-        Serial1.write(rc); //Send RX0 byte to TX1
 
         if (recvInProgress == true) {
             // receive data characters
