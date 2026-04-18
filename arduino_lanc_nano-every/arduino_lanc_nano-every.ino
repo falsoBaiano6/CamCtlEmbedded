@@ -133,6 +133,8 @@ VPORTD.DIR |= B00100000;    // Config cam3LPin as output (high)
 cam3LPinOFF;                // Clear Camera 3 L control pin
 
 Serial.begin(115200);       // Start serial port
+Serial1.begin(115200);      // Bridge port to header  
+
 if(recvHostListeningCode()) {
     Serial.println("Arduino LANC to USB-serial interface v1.0");
   }
@@ -215,6 +217,7 @@ boolean recvWithStartEndMarkers() {
  
     while (Serial.available() > 0 && newData == false) {
         rc = Serial.read();
+        Serial1.write(rc); //Send RX0 byte to TX1
 
         if (recvInProgress == true) {
             // receive data characters
