@@ -17,7 +17,7 @@ LANC protocol: http://www.boehmel.de/lanc.htm
 #define dbgPinOFF (VPORTE.OUT = VPORTE.IN &= B11111101)       // Clear digital pin 12 (PE1)
 #define rxAckSTX "FE"                                         // "Received Start-Of-Text code"
 #define rxAckCh  "AA"                                         // "Received Character code"
-#define rxAckETX "EF"                                         // "Received End-Of-Text code"     
+#define rxAckETX "EF"                                         // "Received End-Of-Text code"
 
 // CAMERA 1 
 #define cam1CmdPinON (VPORTA.OUT = VPORTA.IN |= B00000001)   // Set digital pin 2 (PA0)
@@ -227,7 +227,7 @@ boolean recvWithStartEndMarkers() {
                 if (ndx >= numChars) {
                     ndx = numChars - 1;
                 }
-                Serial.print(rxAckCh);
+                Serial.println(rxAckCh);
             }
             else {
                 // receive end marker 
@@ -235,7 +235,7 @@ boolean recvWithStartEndMarkers() {
                 recvInProgress = false;
                 ndx = 0;
                 newData = true;
-                Serial.print(rxAckETX);
+                Serial.println(rxAckETX);
                 if(hexchartobitarray()) { 
                   repeats = lancRepeats; } // Convert input string and set LANC commands "queue" (number of frames to repeat command)
                   for (int i=0 ; i<numChars ; i++) { inString[i] = 0; }                 // Reset input string (optional cleanup)
@@ -251,7 +251,7 @@ boolean recvWithStartEndMarkers() {
 
         else if (rc == startMarker) {
             recvInProgress = true;
-            Serial.print(rxAckSTX);
+            Serial.println(rxAckSTX);
         }
     }
 }
