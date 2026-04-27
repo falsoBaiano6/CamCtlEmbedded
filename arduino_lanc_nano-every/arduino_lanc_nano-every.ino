@@ -301,7 +301,7 @@ boolean recvWithStartEndMarkers() {
 
         if (recvInProgress == true) {
             // receive data characters
-            if(rc != gotCamId) {
+            if(rc != gotCamId) { // if we haven't yet picked up the camera ID, get it now...
                 switch (rc) {
                   case cam1Id:
                     currCam = cam1Id;
@@ -318,32 +318,34 @@ boolean recvWithStartEndMarkers() {
                 currCam = rc;
                 gotCamId = true;
             }
-            if (rc != endMarker) {
-                inString[ndx] = rc;
-                ndx++;
-                if (ndx >= numChars) {
-                    ndx = numChars - 1;
+            else {  // already have the camera ID, everything else is data or end marker...
+                if (rc != endMarker) {
+                    inString[ndx] = rc;
+                    ndx++;
+                    if (ndx >= numChars) {
+                        ndx = numChars - 1;
+                    }
+                    Serial.println(rxAckCh);
                 }
-                Serial.println(rxAckCh);
-            }
-            else {
-                // receive end marker 
-                // re-initialize variables
-                recvInProgress = false;
-                gotCamId = false;
-                ndx = 0;
-                newData = true;
-                Serial.println(rxAckETX);
-                if(hexchartobitarray()) { 
-                  repeats = lancRepeats; } // Convert input string and set LANC commands "queue" (number of frames to repeat command)
-                  for (int i=0 ; i<numChars ; i++) { inString[i] = 0; }                 // Reset input string (optional cleanup)
+                else {
+                    // receive end marker 
+                    // re-initialize variables
+                    recvInProgress = false;
+                    gotCamId = false;
+                    ndx = 0;
+                    newData = true;
+                    Serial.println(rxAckETX);
+                    if(hexchartobitarray()) { 
+                      repeats = lancRepeats; } // Convert input string and set LANC commands "queue" (number of frames to repeat command)
+                      for (int i=0 ; i<numChars ; i++) { inString[i] = 0; }                 // Reset input string (optional cleanup)
 
-                  // Serial buffer flushed:
-                  flushSerialBuffer();
+                      // Serial buffer flushed:
+                      flushSerialBuffer();
 
-                  return(1);
-                
+                      return(1);
+                    
 
+                }
             }
         }
 
