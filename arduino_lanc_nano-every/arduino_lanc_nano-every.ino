@@ -18,6 +18,7 @@ LANC protocol: http://www.boehmel.de/lanc.htm
 #define rxAckSTX "FE"                                         // "Received Start-Of-Text code"
 #define rxAckCh  "AA"                                         // "Received Character code"
 #define rxAckETX "EF"                                         // "Received End-Of-Text code"
+#define rxAckCID '@'
 #define cam1Id   '1'                                          // Cam1 ID char
 #define cam2Id   '2'                                          // Cam2 ID char
 #define cam3Id   '3'                                          // Cam3 ID char
@@ -301,7 +302,7 @@ boolean recvWithStartEndMarkers() {
 
         if (recvInProgress == true) {
             // receive data characters
-            if(rc != gotCamId) { // if we haven't yet picked up the camera ID, get it now...
+            if(gotCamId == false) { // if we haven't yet picked up the camera ID, get it now...
                 switch (rc) {
                   case cam1Id:
                     currCam = cam1Id;
@@ -317,6 +318,7 @@ boolean recvWithStartEndMarkers() {
                 }
                 currCam = rc;
                 gotCamId = true;
+                Serial.println(rxAckCID);
             }
             else {  // already have the camera ID, everything else is data or end marker...
                 if (rc != endMarker) {
