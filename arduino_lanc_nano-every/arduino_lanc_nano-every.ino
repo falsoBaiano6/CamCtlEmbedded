@@ -161,7 +161,9 @@ void cam1Proc() {
     }
 
   noInterrupts();                                 // Disable interrupts for time-critical jitter-free bit-banging
-
+  
+  while (cam1LancPinREAD) {  }                    // Wait for the falling edge indicating the begin of the start bit
+ 
   ledON;                                          // LED indicator on = LANC message start
   //  if(repeats != 0) {
   //   Serial.println(repeats); }
@@ -201,6 +203,8 @@ void cam2Proc() {
 
  noInterrupts();                                 // Disable interrupts for time-critical jitter-free bit-banging
 
+ while (cam2LancPinREAD) {  }                    // Wait for the falling edge indicating the begin of the start bit
+ 
  ledON;                                          // LED indicator on = LANC message start
 //  if(repeats != 0) {
 //   Serial.println(repeats); }
@@ -239,6 +243,9 @@ void cam3Proc() {
    }
 
  noInterrupts();                                 // Disable interrupts for time-critical jitter-free bit-banging
+
+ while (cam3LancPinREAD) {  }                    // Wait for the falling edge indicating the begin of the start bit
+ 
 
  ledON;                                          // LED indicator on = LANC message start
 //  if(repeats != 0) {
