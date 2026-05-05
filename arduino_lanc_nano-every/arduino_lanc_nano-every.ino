@@ -23,9 +23,10 @@ LANC protocol: http://www.boehmel.de/lanc.htm
 #define rxAckDir "CC"
 #define rxAckOnOff "DD"
 #define rxAck
-#define cam1Id '1'  // Cam1 ID char
-#define cam2Id '2'  // Cam2 ID char
-#define cam3Id '3'  // Cam3 ID char
+#define camUnknown '0'
+#define cam1Id '1'
+#define cam2Id '2'
+#define cam3Id '3'
 #define cam1PT '4'
 #define cam2PT '5'
 #define cam3PT '6'
@@ -104,10 +105,12 @@ unsigned long time;
 const byte numChars = 5;
 char inString[numChars];
 boolean newData = false;
-char currCam = cam1PT;  // cam ID for zoom and pan/tilt operations
-char currCmd = pan;     // Command for pan/tilt operations
+char currCam = camUnknown;  // cam ID until ID is received
+char currCmd = pan;         // Command for pan/tilt operations
 char currDir = up_left;
 char currOnOff = OFF;
+boolean recvInProgress = false;
+boolean gotCamId = false;
 
 void setup() {
   VPORTE.DIR |= B00000100;  // Config ledPin as output (high)
@@ -167,6 +170,11 @@ boolean recvHostListeningCode() {
   rc = Serial.read();
   //Serial1.write(rc); //Send RX0 byte to TX1
   return (rc == HostListeningCode) ? 1 : 0;
+}
+
+void camUnknownProc() {
+  recvUpToCamId();
+  newData = false;
 }
 
 void cam1Proc() {
@@ -324,9 +332,12 @@ void cam3PtProc() {  // similar to zoom proc, but no data sent to camera over LA
 }
 
 void loop() {
+  // Execution loops through the basic receive function until the camera ID is received
   switch (currCam) {
-    case cam1Id:
-      cam1Proc();
+    case camUnknown:
+      camUnknownProc(); // receive up to Cam ID
+      break; 
+    case cam1Id : cam1Proc();
       break;
     case cam2Id:
       cam2Proc();
@@ -335,251 +346,296 @@ void loop() {
       cam3Proc();
       break;
     case cam1PT:
-      cam1PtProc();
+      cam1Proc();
       break;
     case cam2PT:
-      cam2PtProc();
+      cam2Proc();
       break;
     case cam3PT:
-      cam3PtProc();
+      cam3Proc();
       break;
     default:
-      cam1Proc();
+      camUnkownProc();
   }
 }
 
-
-boolean recvPtudWithStartEndMarkers() {
-
-  static boolean recvInProgress = false;
-  static boolean gotCamId = false;
-  static boolean gotCmd = false;
-  static boolean gotDir = false;
-  static boolean gotOnOff = false;
+boolean recvUpToCamId() {
   char startMarker = '<';
-  char endMarker = '>';
   char rc;
-
   while (Serial.available() > 0 && newData == false) {
     rc = Serial.read();
-
     if (recvInProgress == true) {
-      // receive data characters
-      if (rc != endMarker) {
-        if (gotCamId == false) {  // if we haven't yet picked up the camera ID, get it now...
-          switch (rc) {
-            case cam1PT:
-              currCam = cam1PT;
-              break;
-            case cam2PT:
-              currCam = cam2PT;
-              break;
-            case cam3PT:
-              currCam = cam3PT;
-              break;
-            default:
-              currCam = cam1PT;  // if the char is not a cam ID, make it cam1...
-          }
-          currCam = rc;
-          gotCamId = true;
-
-          Serial.println(rxAckCID);
-        } else if (gotCmd == false) {  // if we haven't yet picked up the command ID, get it now...
-
-          switch (rc) {
-            case pan:
-              currCmd = pan;
-              break;
-            case tilt:
-              currCmd = tilt;
-              break;
-            default:
-              currCmd = pan;  // if the char is not a command, make it pan...
-          }
-          gotCmd = true;
-          Serial.println(rxAckCmd);
-        } else if (gotDir == false) {  // if we haven't yet picked up the direction, get it now...
-
-          switch (rc) {
-            case up_down:
-              currCmd = up_left;
-              break;
-            case left_right:
-              currCmd = down_right;
-              break;
-            default:
-              currCmd = up_left;  // if the char is not a direction, make it up_left...
-          }
-          gotDir = true;
-          Serial.println(rxAckDir);
-        } else if (gotOnOff == false) {  // if we haven't yet picked up whether it's ON or OFF, get it now...
-
-          switch (rc) {
-            case ON:
-              currOnOff = ON;
-              break;
-            case OFF:
-              currOnOff = OFF;
-              break;
-            default:
-              currOnOff = OFF;  // if the char is not ON or OFF, make it OFF...
-          }
-          gotOnOff = true;
-          Serial.println(rxAckOnOff);
-        }
-      } else {
-        // received end marker
-        // re-initialize variables
-        recvInProgress = false;
-        gotCamId = false;
-        gotCmd = flase;
-        gotDir = false;
-        gotOnOff = false
-        ndx = 0;
-        newData = true;
-        Serial.println(rxAckETX);
-        // Serial buffer flushed:
-        flushSerialBuffer();
-
-        return (1);
-      }
-    }
-
-    else if (rc == startMarker) {
-      recvInProgress = true;
-      Serial.println(rxAckSTX);
-    }
-  }
-}
-
-boolean recvWithStartEndMarkers() {
-  static boolean recvInProgress = false;
-  static boolean gotCamId = false;
-  static byte ndx = 0;
-  char startMarker = '<';
-  char endMarker = '>';
-  char rc;
-
-  while (Serial.available() > 0 && newData == false) {
-    rc = Serial.read();
-
-    if (recvInProgress == true) {
-      // receive data characters
       if (gotCamId == false) {  // if we haven't yet picked up the camera ID, get it now...
         switch (rc) {
-          case cam1Id:
-            currCam = cam1Id;
+          case cam1:
+            currCam = cam1ID;
             break;
-          case cam2Id:
-            currCam = cam2Id;
+          case cam2:
+            currCam = cam2ID;
             break;
-          case cam3Id:
-            currCam = cam3Id;
+          case cam3:
+            currCam = cam3ID;
+            break;
+          case cam1PT:
+            currCam = cam1PT;
+            break;
+          case cam2PT:
+            currCam = cam2PT;
+            break;
+          case cam3PT:
+            currCam = cam3PT;
             break;
           default:
-            currCam = cam1Id;  // if the char is not a cam ID, make it cam1...
+            currCam = cam1;  // if the char is not a cam ID, make it cam1...
         }
+        currCam = rc;
         gotCamId = true;
-        Serial.println(rxAckCID);
-      } else {  // already have the camera ID, everything else is data or end marker...
-        if (rc != endMarker) {
 
-          Serial.println(rxAckCh);
+        Serial.println(rxAckCID);
+
+      } else if (rc == startMarker) {
+        recvInProgress = true;
+        Serial.println(rxAckSTX);
+      }
+    }
+  }
+
+  boolean recvRemaining() {
+  }
+
+  boolean recvRemainingPT() {
+  }
+
+  boolean recvPtudWithStartEndMarkers() {
+
+    static boolean recvInProgress = false;
+    static boolean gotCamId = false;
+    static boolean gotCmd = false;
+    static boolean gotDir = false;
+    static boolean gotOnOff = false;
+    char startMarker = '<';
+    char endMarker = '>';
+    char rc;
+
+    while (Serial.available() > 0 && newData == false) {
+      rc = Serial.read();
+
+      if (recvInProgress == true) {
+        // receive data characters
+        if (rc != endMarker) {
+          if (gotCamId == false) {  // if we haven't yet picked up the camera ID, get it now...
+            switch (rc) {
+              case cam1PT:
+                currCam = cam1PT;
+                break;
+              case cam2PT:
+                currCam = cam2PT;
+                break;
+              case cam3PT:
+                currCam = cam3PT;
+                break;
+              default:
+                currCam = cam1PT;  // if the char is not a cam ID, make it cam1...
+            }
+            currCam = rc;
+            gotCamId = true;
+
+            Serial.println(rxAckCID);
+          } else if (gotCmd == false) {  // if we haven't yet picked up the command ID, get it now...
+
+            switch (rc) {
+              case pan:
+                currCmd = pan;
+                break;
+              case tilt:
+                currCmd = tilt;
+                break;
+              default:
+                currCmd = pan;  // if the char is not a command, make it pan...
+            }
+            gotCmd = true;
+            Serial.println(rxAckCmd);
+          } else if (gotDir == false) {  // if we haven't yet picked up the direction, get it now...
+
+            switch (rc) {
+              case up_down:
+                currCmd = up_left;
+                break;
+              case left_right:
+                currCmd = down_right;
+                break;
+              default:
+                currCmd = up_left;  // if the char is not a direction, make it up_left...
+            }
+            gotDir = true;
+            Serial.println(rxAckDir);
+          } else if (gotOnOff == false) {  // if we haven't yet picked up whether it's ON or OFF, get it now...
+
+            switch (rc) {
+              case ON:
+                currOnOff = ON;
+                break;
+              case OFF:
+                currOnOff = OFF;
+                break;
+              default:
+                currOnOff = OFF;  // if the char is not ON or OFF, make it OFF...
+            }
+            gotOnOff = true;
+            Serial.println(rxAckOnOff);
+          }
         } else {
           // received end marker
           // re-initialize variables
           recvInProgress = false;
           gotCamId = false;
-          ndx = 0;
+          gotCmd = flase;
+          gotDir = false;
+          gotOnOff = false ndx = 0;
           newData = true;
           Serial.println(rxAckETX);
-          if (hexchartobitarray()) {
-            repeats = lancRepeats;
-          }                                                        // Convert input string and set LANC commands "queue" (number of frames to repeat command)
-          for (int i = 0; i < numChars; i++) { inString[i] = 0; }  // Reset input string (optional cleanup)
-
           // Serial buffer flushed:
           flushSerialBuffer();
 
           return (1);
         }
       }
-    } else if (rc == startMarker) {
-      recvInProgress = true;
-      Serial.println(rxAckSTX);
-    }
-  }
-}
 
-void flushSerialBuffer() {
-  // flush the serial input buffer
-  while (Serial.available() > 0) {
-    Serial.read();
-  }
-}
-
-boolean hexchartobitarray() {
-  // This function converts the hex char LANC command and fills the lancCmd array with the bits in LSB-first order
-
-  int byte1, byte2;
-
-
-
-  for (int i = 0; i < 4; i++) {
-    if (!(isHexadecimalDigit(inString[i]))) {
-      return 0;
+      else if (rc == startMarker) {
+        recvInProgress = true;
+        Serial.println(rxAckSTX);
+      }
     }
   }
 
-  byte1 = (hexchartoint(inString[0]) << 4) + hexchartoint(inString[1]);
-  byte2 = (hexchartoint(inString[2]) << 4) + hexchartoint(inString[3]);
+  boolean recvWithStartEndMarkers() {
+    static boolean recvInProgress = false;
+    static boolean gotCamId = false;
+    static byte ndx = 0;
+    char startMarker = '<';
+    char endMarker = '>';
+    char rc;
 
-  for (int i = 0; i < 8; i++) { lancCmd[i] = bitRead(byte1, i); }
-  for (int i = 0; i < 8; i++) { lancCmd[i + 8] = bitRead(byte2, i); }
+    while (Serial.available() > 0 && newData == false) {
+      rc = Serial.read();
 
-  return 1;
-}
+      if (recvInProgress == true) {
+        // receive data characters
+        if (gotCamId == false) {  // if we haven't yet picked up the camera ID, get it now...
+          switch (rc) {
+            case cam1Id:
+              currCam = cam1Id;
+              break;
+            case cam2Id:
+              currCam = cam2Id;
+              break;
+            case cam3Id:
+              currCam = cam3Id;
+              break;
+            default:
+              currCam = cam1Id;  // if the char is not a cam ID, make it cam1...
+          }
+          gotCamId = true;
+          Serial.println(rxAckCID);
+        } else {  // already have the camera ID, everything else is data or end marker...
+          if (rc != endMarker) {
 
-int hexchartoint(char hexchar) {
-  switch (hexchar) {
-    case 'F':
-      return 15;
-      break;
-    case 'f':
-      return 15;
-      break;
-    case 'E':
-      return 14;
-      break;
-    case 'e':
-      return 14;
-      break;
-    case 'D':
-      return 13;
-      break;
-    case 'd':
-      return 13;
-      break;
-    case 'C':
-      return 12;
-      break;
-    case 'c':
-      return 12;
-      break;
-    case 'B':
-      return 11;
-      break;
-    case 'b':
-      return 11;
-      break;
-    case 'A':
-      return 10;
-      break;
-    case 'a':
-      return 10;
-      break;
-    default:
-      return (int)(hexchar - 48);
-      break;
+            Serial.println(rxAckCh);
+          } else {
+            // received end marker
+            // re-initialize variables
+            recvInProgress = false;
+            gotCamId = false;
+            ndx = 0;
+            newData = true;
+            Serial.println(rxAckETX);
+            if (hexchartobitarray()) {
+              repeats = lancRepeats;
+            }                                                        // Convert input string and set LANC commands "queue" (number of frames to repeat command)
+            for (int i = 0; i < numChars; i++) { inString[i] = 0; }  // Reset input string (optional cleanup)
+
+            // Serial buffer flushed:
+            flushSerialBuffer();
+
+            return (1);
+          }
+        }
+      } else if (rc == startMarker) {
+        recvInProgress = true;
+        Serial.println(rxAckSTX);
+      }
+    }
   }
-}
+
+  void flushSerialBuffer() {
+    // flush the serial input buffer
+    while (Serial.available() > 0) {
+      Serial.read();
+    }
+  }
+
+  boolean hexchartobitarray() {
+    // This function converts the hex char LANC command and fills the lancCmd array with the bits in LSB-first order
+
+    int byte1, byte2;
+
+
+
+    for (int i = 0; i < 4; i++) {
+      if (!(isHexadecimalDigit(inString[i]))) {
+        return 0;
+      }
+    }
+
+    byte1 = (hexchartoint(inString[0]) << 4) + hexchartoint(inString[1]);
+    byte2 = (hexchartoint(inString[2]) << 4) + hexchartoint(inString[3]);
+
+    for (int i = 0; i < 8; i++) { lancCmd[i] = bitRead(byte1, i); }
+    for (int i = 0; i < 8; i++) { lancCmd[i + 8] = bitRead(byte2, i); }
+
+    return 1;
+  }
+
+  int hexchartoint(char hexchar) {
+    switch (hexchar) {
+      case 'F':
+        return 15;
+        break;
+      case 'f':
+        return 15;
+        break;
+      case 'E':
+        return 14;
+        break;
+      case 'e':
+        return 14;
+        break;
+      case 'D':
+        return 13;
+        break;
+      case 'd':
+        return 13;
+        break;
+      case 'C':
+        return 12;
+        break;
+      case 'c':
+        return 12;
+        break;
+      case 'B':
+        return 11;
+        break;
+      case 'b':
+        return 11;
+        break;
+      case 'A':
+        return 10;
+        break;
+      case 'a':
+        return 10;
+        break;
+      default:
+        return (int)(hexchar - 48);
+        break;
+    }
+  }
