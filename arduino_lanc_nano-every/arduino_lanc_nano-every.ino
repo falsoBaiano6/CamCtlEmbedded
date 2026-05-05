@@ -111,6 +111,10 @@ char currDir = up_left;
 char currOnOff = OFF;
 boolean recvInProgress = false;
 boolean gotCamId = false;
+boolean gotCmd = false;
+boolean gotDir = false;
+boolean gotOnOff = false;
+boolean LANC = false;
 
 void setup() {
   VPORTE.DIR |= B00000100;  // Config ledPin as output (high)
@@ -174,160 +178,145 @@ boolean recvHostListeningCode() {
 
 void camUnknownProc() {
   recvUpToCamId();
-  newData = false;
 }
 
 void cam1Proc() {
-  time = micros();  // Wait for lancPin to be high for at least 5ms
-  while (micros() - time < 5000) {
-    if (!cam1LancPinREAD) { time = micros(); }
-  }
-
-  noInterrupts();  // Disable interrupts for time-critical jitter-free bit-banging
-
-  while (cam1LancPinREAD) {}  // Wait for the falling edge indicating the begin of the start bit
-
-  ledON;  // LED indicator on = LANC message start
-  //  if(repeats != 0) {
-  //   Serial.println(repeats); }
-  for (int bytenr = 0; bytenr < 8; bytenr++) {  // Process 8-byte frame
-    delayMicroseconds(bitDura - 4);             // Wait start bit duration at the beginning of a byte
-    for (int bitnr = 0; bitnr < 8; bitnr++) {   // Process 8 bits
-      if (bytenr < 2 && repeats) {              // Output data (if available) during the first two bytes
-        if (lancCmd[bitnr + bytenr * 8]) {
-          cam1CmdPinON;
-        } else {
-          cam1CmdPinOFF;
-        }
-      }
-      delayMicroseconds(halfbitDura - 3);
-      bitWrite(lancByte, bitnr, !cam1LancPinREAD);  // Read data line during middle of bit and write the bit to lancByte (LANC is inverted!)
-      delayMicroseconds(halfbitDura);
+  if (LANC) {
+    time = micros();  // Wait for lancPin to be high for at least 5ms
+    while (micros() - time < 5000) {
+      if (!cam1LancPinREAD) { time = micros(); }
     }
-    cam1CmdPinOFF;
-    delayMicroseconds(halfbitDura - 10);  // Make sure to be in the stop bit before waiting for next byte; small delay adjust for sending serial data
-    //Serial.write(lancByte);                         // Send lancByte through serial port while waiting for next start bit
-    if (bytenr < 7) {
-      while (cam1LancPinREAD) {}
-    }  // Wait as long as the LANC line is high until the next start bit EXCEPT at end of frame
+
+    noInterrupts();  // Disable interrupts for time-critical jitter-free bit-banging
+
+    while (cam1LancPinREAD) {}  // Wait for the falling edge indicating the begin of the start bit
+
+    ledON;  // LED indicator on = LANC message start
+
+    for (int bytenr = 0; bytenr < 8; bytenr++) {  // Process 8-byte frame
+      delayMicroseconds(bitDura - 4);             // Wait start bit duration at the beginning of a byte
+      for (int bitnr = 0; bitnr < 8; bitnr++) {   // Process 8 bits
+        if (bytenr < 2 && repeats) {              // Output data (if available) during the first two bytes
+          if (lancCmd[bitnr + bytenr * 8]) {
+            cam1CmdPinON;
+          } else {
+            cam1CmdPinOFF;
+          }
+        }
+        delayMicroseconds(halfbitDura - 3);
+        bitWrite(lancByte, bitnr, !cam1LancPinREAD);  // Read data line during middle of bit and write the bit to lancByte (LANC is inverted!)
+        delayMicroseconds(halfbitDura);
+      }
+      cam1CmdPinOFF;
+      delayMicroseconds(halfbitDura - 10);  // Make sure to be in the stop bit before waiting for next byte; small delay adjust for sending serial data
+
+      if (bytenr < 7) {
+        while (cam1LancPinREAD) {}
+      }  // Wait as long as the LANC line is high until the next start bit EXCEPT at end of frame
+    }
+
+    if (repeats > 0) { repeats--; }  // If a LANC command was sent in this frame, decrease the send "queue"; nothing is sent if repeats is 0
+
+    ledOFF;        // LED indicator on = LANC message end
+    interrupts();  // Re-enable interrupts
+    recvRemainingLANC();
+  } else {
+    recvRemainingPT();
   }
-
-  //Serial.write(10);                               // Write line feed (0xA) to serial port after frame
-
-  if (repeats > 0) { repeats--; }  // If a LANC command was sent in this frame, decrease the send "queue"; nothing is sent if repeats is 0
-
-  ledOFF;        // LED indicator on = LANC message end
-  interrupts();  // Re-enable interrupts
-
-  recvWithStartEndMarkers();
   newData = false;
 }
 
 void cam2Proc() {
-  time = micros();  // Wait for lancPin to be high for at least 5ms
-  while (micros() - time < 5000) {
-    if (!cam2LancPinREAD) { time = micros(); }
-  }
-
-  noInterrupts();  // Disable interrupts for time-critical jitter-free bit-banging
-
-  while (cam2LancPinREAD) {}  // Wait for the falling edge indicating the begin of the start bit
-
-  ledON;                                        // LED indicator on = LANC message start
-                                                //  if(repeats != 0) {
-                                                //   Serial.println(repeats); }
-  for (int bytenr = 0; bytenr < 8; bytenr++) {  // Process 8-byte frame
-    delayMicroseconds(bitDura - 4);             // Wait start bit duration at the beginning of a byte
-    for (int bitnr = 0; bitnr < 8; bitnr++) {   // Process 8 bits
-      if (bytenr < 2 && repeats) {              // Output data (if available) during the first two bytes
-        if (lancCmd[bitnr + bytenr * 8]) {
-          cam2CmdPinON;
-        } else {
-          cam2CmdPinOFF;
-        }
-      }
-      delayMicroseconds(halfbitDura - 3);
-      bitWrite(lancByte, bitnr, !cam2LancPinREAD);  // Read data line during middle of bit and write the bit to lancByte (LANC is inverted!)
-      delayMicroseconds(halfbitDura);
+  if (LANC) {
+    time = micros();  // Wait for lancPin to be high for at least 5ms
+    while (micros() - time < 5000) {
+      if (!cam2LancPinREAD) { time = micros(); }
     }
-    cam2CmdPinOFF;
-    delayMicroseconds(halfbitDura - 10);  // Make sure to be in the stop bit before waiting for next byte; small delay adjust for sending serial data
-    //Serial.write(lancByte);                         // Send lancByte through serial port while waiting for next start bit
-    if (bytenr < 7) {
-      while (cam2LancPinREAD) {}
-    }  // Wait as long as the LANC line is high until the next start bit EXCEPT at end of frame
+
+    noInterrupts();  // Disable interrupts for time-critical jitter-free bit-banging
+
+    while (cam2LancPinREAD) {}  // Wait for the falling edge indicating the begin of the start bit
+
+    ledON;  // LED indicator on = LANC message start
+
+    for (int bytenr = 0; bytenr < 8; bytenr++) {  // Process 8-byte frame
+      delayMicroseconds(bitDura - 4);             // Wait start bit duration at the beginning of a byte
+      for (int bitnr = 0; bitnr < 8; bitnr++) {   // Process 8 bits
+        if (bytenr < 2 && repeats) {              // Output data (if available) during the first two bytes
+          if (lancCmd[bitnr + bytenr * 8]) {
+            cam2CmdPinON;
+          } else {
+            cam2CmdPinOFF;
+          }
+        }
+        delayMicroseconds(halfbitDura - 3);
+        bitWrite(lancByte, bitnr, !cam2LancPinREAD);  // Read data line during middle of bit and write the bit to lancByte (LANC is inverted!)
+        delayMicroseconds(halfbitDura);
+      }
+      cam2CmdPinOFF;
+      delayMicroseconds(halfbitDura - 10);  // Make sure to be in the stop bit before waiting for next byte; small delay adjust for sending serial data
+      //Serial.write(lancByte);                         // Send lancByte through serial port while waiting for next start bit
+      if (bytenr < 7) {
+        while (cam2LancPinREAD) {}
+      }  // Wait as long as the LANC line is high until the next start bit EXCEPT at end of frame
+    }
+
+    //Serial.write(10);                               // Write line feed (0xA) to serial port after frame
+
+    if (repeats > 0) { repeats--; }  // If a LANC command was sent in this frame, decrease the send "queue"; nothing is sent if repeats is 0
+
+    ledOFF;        // LED indicator on = LANC message end
+    interrupts();  // Re-enable interrupts
+    recvRemainingLANC();
+  } else {
+    recvRemainingPT();
   }
-
-  //Serial.write(10);                               // Write line feed (0xA) to serial port after frame
-
-  if (repeats > 0) { repeats--; }  // If a LANC command was sent in this frame, decrease the send "queue"; nothing is sent if repeats is 0
-
-  ledOFF;        // LED indicator on = LANC message end
-  interrupts();  // Re-enable interrupts
-
-  recvWithStartEndMarkers();
   newData = false;
 }
 
 void cam3Proc() {
-  time = micros();  // Wait for lancPin to be high for at least 5ms
-  while (micros() - time < 5000) {
-    if (!cam3LancPinREAD) { time = micros(); }
-  }
-
-  noInterrupts();  // Disable interrupts for time-critical jitter-free bit-banging
-
-  while (cam3LancPinREAD) {}  // Wait for the falling edge indicating the begin of the start bit
-
-
-  ledON;                                        // LED indicator on = LANC message start
-                                                //  if(repeats != 0) {
-                                                //   Serial.println(repeats); }
-  for (int bytenr = 0; bytenr < 8; bytenr++) {  // Process 8-byte frame
-    delayMicroseconds(bitDura - 4);             // Wait start bit duration at the beginning of a byte
-    for (int bitnr = 0; bitnr < 8; bitnr++) {   // Process 8 bits
-      if (bytenr < 2 && repeats) {              // Output data (if available) during the first two bytes
-        if (lancCmd[bitnr + bytenr * 8]) {
-          cam3CmdPinON;
-        } else {
-          cam3CmdPinOFF;
-        }
-      }
-      delayMicroseconds(halfbitDura - 3);
-      bitWrite(lancByte, bitnr, !cam3LancPinREAD);  // Read data line during middle of bit and write the bit to lancByte (LANC is inverted!)
-      delayMicroseconds(halfbitDura);
+  if (LANC) {
+    time = micros();  // Wait for lancPin to be high for at least 5ms
+    while (micros() - time < 5000) {
+      if (!cam3LancPinREAD) { time = micros(); }
     }
-    cam3CmdPinOFF;
-    delayMicroseconds(halfbitDura - 10);  // Make sure to be in the stop bit before waiting for next byte; small delay adjust for sending serial data
-    //Serial.write(lancByte);                         // Send lancByte through serial port while waiting for next start bit
-    if (bytenr < 7) {
-      while (cam3LancPinREAD) {}
-    }  // Wait as long as the LANC line is high until the next start bit EXCEPT at end of frame
+
+    noInterrupts();  // Disable interrupts for time-critical jitter-free bit-banging
+
+    while (cam3LancPinREAD) {}  // Wait for the falling edge indicating the begin of the start bit
+
+    ledON;  // LED indicator on = LANC message start
+
+    for (int bytenr = 0; bytenr < 8; bytenr++) {  // Process 8-byte frame
+      delayMicroseconds(bitDura - 4);             // Wait start bit duration at the beginning of a byte
+      for (int bitnr = 0; bitnr < 8; bitnr++) {   // Process 8 bits
+        if (bytenr < 2 && repeats) {              // Output data (if available) during the first two bytes
+          if (lancCmd[bitnr + bytenr * 8]) {
+            cam3CmdPinON;
+          } else {
+            cam3CmdPinOFF;
+          }
+        }
+        delayMicroseconds(halfbitDura - 3);
+        bitWrite(lancByte, bitnr, !cam3LancPinREAD);  // Read data line during middle of bit and write the bit to lancByte (LANC is inverted!)
+        delayMicroseconds(halfbitDura);
+      }
+      cam3CmdPinOFF;
+      delayMicroseconds(halfbitDura - 10);  // Make sure to be in the stop bit before waiting for next byte; small delay adjust for sending serial data
+
+      if (bytenr < 7) {
+        while (cam3LancPinREAD) {}
+      }  // Wait as long as the LANC line is high until the next start bit EXCEPT at end of frame
+    }
+
+    if (repeats > 0) { repeats--; }  // If a LANC command was sent in this frame, decrease the send "queue"; nothing is sent if repeats is 0
+
+    ledOFF;        // LED indicator on = LANC message end
+    interrupts();  // Re-enable interrupts
+    recvRemainingLANC();
+  } else {
+    recvRemainingPT();
   }
-
-  //Serial.write(10);                               // Write line feed (0xA) to serial port after frame
-
-  if (repeats > 0) { repeats--; }  // If a LANC command was sent in this frame, decrease the send "queue"; nothing is sent if repeats is 0
-
-  ledOFF;        // LED indicator on = LANC message end
-  interrupts();  // Re-enable interrupts
-
-  recvWithStartEndMarkers();
-  newData = false;
-}
-
-void cam1PtProc() {  // similar to zoom proc, but no data sent to camera over LANC
-  recvPtudWithStartEndMarkers();
-  newData = false;
-}
-
-void cam2PtProc() {  // similar to zoom proc, but no data sent to camera over LANC
-  recvPtudWithStartEndMarkers();
-  newData = false;
-}
-
-void cam3PtProc() {  // similar to zoom proc, but no data sent to camera over LANC
-  recvPtudWithStartEndMarkers();
   newData = false;
 }
 
@@ -335,9 +324,10 @@ void loop() {
   // Execution loops through the basic receive function until the camera ID is received
   switch (currCam) {
     case camUnknown:
-      camUnknownProc(); // receive up to Cam ID
-      break; 
-    case cam1Id : cam1Proc();
+      camUnknownProc();  // receive up to Cam ID
+      break;
+    case cam1Id:
+      cam1Proc();
       break;
     case cam2Id:
       cam2Proc();
@@ -355,7 +345,7 @@ void loop() {
       cam3Proc();
       break;
     default:
-      camUnkownProc();
+      camUnknownProc();
   }
 }
 
@@ -367,26 +357,33 @@ boolean recvUpToCamId() {
     if (recvInProgress == true) {
       if (gotCamId == false) {  // if we haven't yet picked up the camera ID, get it now...
         switch (rc) {
-          case cam1:
-            currCam = cam1ID;
+          case cam1Id:
+            currCam = cam1Id;
+            LANC = true;
             break;
-          case cam2:
-            currCam = cam2ID;
+          case cam2Id:
+            currCam = cam2Id;
+            LANC = true;
             break;
-          case cam3:
-            currCam = cam3ID;
+          case cam3Id:
+            currCam = cam3Id;
+            LANC = true;
             break;
           case cam1PT:
             currCam = cam1PT;
+            LANC = false;
             break;
           case cam2PT:
             currCam = cam2PT;
+            LANC = false;
             break;
           case cam3PT:
             currCam = cam3PT;
+            LANC = false;
             break;
           default:
-            currCam = cam1;  // if the char is not a cam ID, make it cam1...
+            currCam = camUnknown;
+            LANC = false;
         }
         currCam = rc;
         gotCamId = true;
@@ -399,243 +396,188 @@ boolean recvUpToCamId() {
       }
     }
   }
+}
 
-  boolean recvRemaining() {
-  }
+boolean recvRemainingLANC() {
+  static byte ndx = 0;
+  char endMarker = '>';
+  char rc;
 
-  boolean recvRemainingPT() {
-  }
+  while (Serial.available() > 0 && newData == false) {
+    rc = Serial.read();
 
-  boolean recvPtudWithStartEndMarkers() {
-
-    static boolean recvInProgress = false;
-    static boolean gotCamId = false;
-    static boolean gotCmd = false;
-    static boolean gotDir = false;
-    static boolean gotOnOff = false;
-    char startMarker = '<';
-    char endMarker = '>';
-    char rc;
-
-    while (Serial.available() > 0 && newData == false) {
-      rc = Serial.read();
-
-      if (recvInProgress == true) {
-        // receive data characters
-        if (rc != endMarker) {
-          if (gotCamId == false) {  // if we haven't yet picked up the camera ID, get it now...
-            switch (rc) {
-              case cam1PT:
-                currCam = cam1PT;
-                break;
-              case cam2PT:
-                currCam = cam2PT;
-                break;
-              case cam3PT:
-                currCam = cam3PT;
-                break;
-              default:
-                currCam = cam1PT;  // if the char is not a cam ID, make it cam1...
-            }
-            currCam = rc;
-            gotCamId = true;
-
-            Serial.println(rxAckCID);
-          } else if (gotCmd == false) {  // if we haven't yet picked up the command ID, get it now...
-
-            switch (rc) {
-              case pan:
-                currCmd = pan;
-                break;
-              case tilt:
-                currCmd = tilt;
-                break;
-              default:
-                currCmd = pan;  // if the char is not a command, make it pan...
-            }
-            gotCmd = true;
-            Serial.println(rxAckCmd);
-          } else if (gotDir == false) {  // if we haven't yet picked up the direction, get it now...
-
-            switch (rc) {
-              case up_down:
-                currCmd = up_left;
-                break;
-              case left_right:
-                currCmd = down_right;
-                break;
-              default:
-                currCmd = up_left;  // if the char is not a direction, make it up_left...
-            }
-            gotDir = true;
-            Serial.println(rxAckDir);
-          } else if (gotOnOff == false) {  // if we haven't yet picked up whether it's ON or OFF, get it now...
-
-            switch (rc) {
-              case ON:
-                currOnOff = ON;
-                break;
-              case OFF:
-                currOnOff = OFF;
-                break;
-              default:
-                currOnOff = OFF;  // if the char is not ON or OFF, make it OFF...
-            }
-            gotOnOff = true;
-            Serial.println(rxAckOnOff);
-          }
-        } else {
-          // received end marker
-          // re-initialize variables
-          recvInProgress = false;
-          gotCamId = false;
-          gotCmd = flase;
-          gotDir = false;
-          gotOnOff = false ndx = 0;
-          newData = true;
-          Serial.println(rxAckETX);
-          // Serial buffer flushed:
-          flushSerialBuffer();
-
-          return (1);
+    if (recvInProgress == true) {
+      // receive data characters
+      if (rc != endMarker) {
+        inString[ndx] = rc;
+        ndx++;
+        if (ndx >= numChars) {
+          ndx = numChars - 1;
         }
-      }
+        Serial.println(rxAckCh);
+      } else {
+        // received end marker
+        // re-initialize variables
+        recvInProgress = false;
+        gotCamId = false;
+        ndx = 0;
+        newData = true;
+        Serial.println(rxAckETX);
+        if (hexchartobitarray()) {
+          repeats = lancRepeats;
+        }                                                        // Convert input string and set LANC commands "queue" (number of frames to repeat command)
+        for (int i = 0; i < numChars; i++) { inString[i] = 0; }  // Reset input string (optional cleanup)
 
-      else if (rc == startMarker) {
-        recvInProgress = true;
-        Serial.println(rxAckSTX);
+        // Serial buffer flushed:
+        flushSerialBuffer();
+
+        return (1);
       }
     }
   }
+}
 
-  boolean recvWithStartEndMarkers() {
-    static boolean recvInProgress = false;
-    static boolean gotCamId = false;
-    static byte ndx = 0;
-    char startMarker = '<';
-    char endMarker = '>';
-    char rc;
+boolean recvRemainingPT() {
+  char endMarker = '>';
+  char rc;
 
-    while (Serial.available() > 0 && newData == false) {
-      rc = Serial.read();
+  while (Serial.available() > 0 && newData == false) {
+    rc = Serial.read();
 
-      if (recvInProgress == true) {
-        // receive data characters
-        if (gotCamId == false) {  // if we haven't yet picked up the camera ID, get it now...
+    if (recvInProgress == true) {
+      // receive data characters
+      if (rc != endMarker) {
+        if (gotCmd == false) {  // if we haven't yet picked up the command ID, get it now...
+
           switch (rc) {
-            case cam1Id:
-              currCam = cam1Id;
+            case pan:
+              currCmd = pan;
               break;
-            case cam2Id:
-              currCam = cam2Id;
-              break;
-            case cam3Id:
-              currCam = cam3Id;
+            case tilt:
+              currCmd = tilt;
               break;
             default:
-              currCam = cam1Id;  // if the char is not a cam ID, make it cam1...
+              currCmd = pan;  // if the char is not a command, make it pan...
           }
-          gotCamId = true;
-          Serial.println(rxAckCID);
-        } else {  // already have the camera ID, everything else is data or end marker...
-          if (rc != endMarker) {
+          gotCmd = true;
+          Serial.println(rxAckCmd);
+        } else if (gotDir == false) {  // if we haven't yet picked up the direction, get it now...
 
-            Serial.println(rxAckCh);
-          } else {
-            // received end marker
-            // re-initialize variables
-            recvInProgress = false;
-            gotCamId = false;
-            ndx = 0;
-            newData = true;
-            Serial.println(rxAckETX);
-            if (hexchartobitarray()) {
-              repeats = lancRepeats;
-            }                                                        // Convert input string and set LANC commands "queue" (number of frames to repeat command)
-            for (int i = 0; i < numChars; i++) { inString[i] = 0; }  // Reset input string (optional cleanup)
-
-            // Serial buffer flushed:
-            flushSerialBuffer();
-
-            return (1);
+          switch (rc) {
+            case up_left:
+              currCmd = up_left;
+              break;
+            case down_right:
+              currCmd = down_right;
+              break;
+            default:
+              currCmd = up_left;  // if the char is not a direction, make it up_left...
           }
+          gotDir = true;
+          Serial.println(rxAckDir);
+        } else if (gotOnOff == false) {  // if we haven't yet picked up whether it's ON or OFF, get it now...
+
+          switch (rc) {
+            case ON:
+              currOnOff = ON;
+              break;
+            case OFF:
+              currOnOff = OFF;
+              break;
+            default:
+              currOnOff = OFF;  // if the char is not ON or OFF, make it OFF...
+          }
+          gotOnOff = true;
+          Serial.println(rxAckOnOff);
         }
-      } else if (rc == startMarker) {
-        recvInProgress = true;
-        Serial.println(rxAckSTX);
+      } else {
+        // received end marker
+        // re-initialize variables
+        recvInProgress = false;
+        gotCamId = false;
+        gotCmd = false;
+        gotDir = false;
+        gotOnOff = false;
+        newData = true;
+        Serial.println(rxAckETX);
+        // Serial buffer flushed:
+        flushSerialBuffer();
+
+        return (1);
       }
     }
   }
+}
 
-  void flushSerialBuffer() {
-    // flush the serial input buffer
-    while (Serial.available() > 0) {
-      Serial.read();
+void flushSerialBuffer() {
+  // flush the serial input buffer
+  while (Serial.available() > 0) {
+    Serial.read();
+  }
+}
+
+boolean hexchartobitarray() {
+  // This function converts the hex char LANC command and fills the lancCmd array with the bits in LSB-first order
+
+  int byte1, byte2;
+
+
+
+  for (int i = 0; i < 4; i++) {
+    if (!(isHexadecimalDigit(inString[i]))) {
+      return 0;
     }
   }
 
-  boolean hexchartobitarray() {
-    // This function converts the hex char LANC command and fills the lancCmd array with the bits in LSB-first order
+  byte1 = (hexchartoint(inString[0]) << 4) + hexchartoint(inString[1]);
+  byte2 = (hexchartoint(inString[2]) << 4) + hexchartoint(inString[3]);
 
-    int byte1, byte2;
+  for (int i = 0; i < 8; i++) { lancCmd[i] = bitRead(byte1, i); }
+  for (int i = 0; i < 8; i++) { lancCmd[i + 8] = bitRead(byte2, i); }
 
+  return 1;
+}
 
-
-    for (int i = 0; i < 4; i++) {
-      if (!(isHexadecimalDigit(inString[i]))) {
-        return 0;
-      }
-    }
-
-    byte1 = (hexchartoint(inString[0]) << 4) + hexchartoint(inString[1]);
-    byte2 = (hexchartoint(inString[2]) << 4) + hexchartoint(inString[3]);
-
-    for (int i = 0; i < 8; i++) { lancCmd[i] = bitRead(byte1, i); }
-    for (int i = 0; i < 8; i++) { lancCmd[i + 8] = bitRead(byte2, i); }
-
-    return 1;
+int hexchartoint(char hexchar) {
+  switch (hexchar) {
+    case 'F':
+      return 15;
+      break;
+    case 'f':
+      return 15;
+      break;
+    case 'E':
+      return 14;
+      break;
+    case 'e':
+      return 14;
+      break;
+    case 'D':
+      return 13;
+      break;
+    case 'd':
+      return 13;
+      break;
+    case 'C':
+      return 12;
+      break;
+    case 'c':
+      return 12;
+      break;
+    case 'B':
+      return 11;
+      break;
+    case 'b':
+      return 11;
+      break;
+    case 'A':
+      return 10;
+      break;
+    case 'a':
+      return 10;
+      break;
+    default:
+      return (int)(hexchar - 48);
+      break;
   }
-
-  int hexchartoint(char hexchar) {
-    switch (hexchar) {
-      case 'F':
-        return 15;
-        break;
-      case 'f':
-        return 15;
-        break;
-      case 'E':
-        return 14;
-        break;
-      case 'e':
-        return 14;
-        break;
-      case 'D':
-        return 13;
-        break;
-      case 'd':
-        return 13;
-        break;
-      case 'C':
-        return 12;
-        break;
-      case 'c':
-        return 12;
-        break;
-      case 'B':
-        return 11;
-        break;
-      case 'b':
-        return 11;
-        break;
-      case 'A':
-        return 10;
-        break;
-      case 'a':
-        return 10;
-        break;
-      default:
-        return (int)(hexchar - 48);
-        break;
-    }
-  }
+}
