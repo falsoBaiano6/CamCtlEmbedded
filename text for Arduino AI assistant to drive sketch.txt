@@ -1,0 +1,54 @@
+Create code to interface between an app on a host computer communicating over USB (as a virtual COM port) and 3 cameras.
+The host and the arduino use character codes to communicate with each other. The embedded interface app runs on an Arduino UNO R4 Wifi, and (via a daughterboard) drives 3 camera zoom control ports using the Sony LANC protocol.  Each of the 3 cameras has a pan/tilt stage.  The pan/tilt stages are controlled by commanding to drive a port to ground for 4 possible directions: UP, DOWN, RIGHT, and LEFT.
+
+Details of communication: 
+
+1) Serial communication between the host computer and the Arduino occurs in a tight handshake, and the codes are either single of double characters. The host expects all messages to end with CRLF (\r\n).  After reset, the Arduino waits for a HostListeningCode ('!') character -- it won't do anything further until the HostListeningCode is received. Once it is received, it does a Serial.println("Arduino LANC to USB-serial interface v1.0") call;
+  
+The Arduino expects the host to use a start marker '<' and an end marker '>' for incoming messages from the host. Until a start marker is received all incoming traffic is ignored.
+
+2) Pseudocode fror the general messaging scheme between host and arduino is as follows:
+
+On arduino reset:
+initialize arduino
+wait for a character to be received from host
+if it's  HostListeningCode then Serial.println("Arduino LANC to USB-serial interface v1.0")
+wait for the start marker
+wait for the next character to be received from host
+if it's cam1Id, cam2Id or cam3Id then Serial.println(rxAckCID)
+wait for the end marker // four digit character assumed received
+
+3) The 3 LANC camera ports operate at 9600 baud, and only one port will be operating at a time. 
+ 
+#define rxAckSTX "FE"                                         // "Received Start-Of-Text code"
+#define rxAckCh  "AA"                                         // "Received Character code"
+#define rxAckETX "EF"                                         // "Received End-Of-Text code"
+#define rxAckCID '@'                                          // "Received Camera ID code" 
+#define cam1Id   '1'                                          // Cam1 ID char
+#define cam2Id   '2'                                          // Cam2 ID char
+#define cam3Id   '3'                                          // Cam3 ID char
+
+4) The daughtercard hardware break the bidirectional LANC signals pin into 1 output channel and 1 input received data channel (1 set per camera). The LANC output (command) channels are all PWM-capable pins. It would be beneficial to use interupts to drive the LANC output channels and manage reception of LANC inputs so there is minimal interference from managing serial port traffic.
+
+5) The codes for PAN UP, PAN DOWN, TILT LEFT, TILT RIGHT have not been selected yet. The PAN and TILT commands for each camera are realized as "one hot" decoder outputs -- a unique output signal for each.  The default state for all of the PAN/TILT outputs shall be high Z. When actuated, a PAN/TILT signal will be grounded (i.e. a logic '0' will be written to the port pin.  
+
+6) Port assignments on the Arduino:
+
+D2  -- CAM3_PAN_LEFT
+D3  -- CAM3_PAN_RIGHT
+D4  -- CAM3_TILT_DOWN
+D5  -- CAM1_LANC_CMD_OUT
+D6  -- CAM2_LANC_CMD_OUT
+D7  -- CAM2_PAN_RIGHT
+D8  -- CAM2_TILT_DOWN
+D9  -- CAM3_LANC_CMD_OUT
+D10 -- CAM1_PAN_LEFT
+D11 -- CAM1_PAN_RIGHT
+D12 -- CAM1_TILT_DOWN
+D13 -- CAM1_TILT_UP
+D14 -- CAM3_LANC_SIG_IN
+D15 -- CAM2_TILT_UP
+D16 -- CAM2_LANC_SIG_IN
+D17 -- CAM2_PAN_LEFT
+D18 -- CAM1_LANC_SIG_IN
+D19 -- CAM3_TILT_UP
