@@ -1,0 +1,188 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// INIT ROUTINE
+// ═══════════════════════════════════════════════════════════════════════════════
+void initHardware() {
+  // --- Serial (USB virtual COM) ---
+  Serial.begin(115200);
+  // Wait for host to open port (native USB)
+  uint32_t t = millis();
+  while (!Serial && (millis() - t < 5000));
+
+  // --- Pan/tilt pins: all HIGH-Z by default ---
+  releaseAllPanTilt();
+
+  // --- LANC CMD pins: OUTPUT, idle HIGH ---
+  for (uint8_t i = 0; i < 3; i++) {
+    pinMode(lancCmdPin[i], OUTPUT);
+    digitalWrite(lancCmdPin[i], HIGH);
+  }
+
+  // --- LANC SIG_IN pins: INPUT, pull-up (LANC bus is active-low) ---
+  for (uint8_t i = 0; i < 3; i++) {
+    pinMode(lancSigPin[i], INPUT_PULLUP);
+  }
+
+  // --- LANC timer: AGT0 fires every LANC_HALF_BIT_US (52 µs) ---
+  // Use AGT periodic timer channel 0
+  if (lancTimer.begin(TIMER_MODE_PERIODIC,
+                      AGT_TIMER,
+                      0,                        // channel 0
+                      1.0e6f / LANC_HALF_BIT_US, // frequency in Hz (~19231 Hz)
+                      0.0f,
+                      lancTimerISR)) {
+    lancTimer.setup_overflow_irq();
+    lancTimer.open();
+    lancTimer.start();
+  }
+
+  // --- Application state ---
+  activeCam     = -1;
+  hostConnected = false;
+  inFrame       = false;
+  rxLen         = 0;
+
+  // --- Host handshake ---
+  // Wait for HostListeningCode '!'
+  while (true) {
+    if (Serial.available()) {
+      char c = (char)Serial.read();
+      if (c == HostListeningCode) {
+        Serial.println("Arduino LANC to USB-serial interface v1.0");
+        hostConnected = true;
+        break;
+      }
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COMMAND PARSING ROUTINE
+// Call from loop(); accumulates chars, acts on complete '<...>' frames.
+//
+// Supported frame formats:
+//   <CamId D>            select camera + pan/tilt:  e.g. <1U> <2L> <3S>
+//   <CamId Z B1 B2>      raw LANC, two hex bytes:   e.g. <1Z 28 00>
+//   (spaces in LANC frame are optional / ignored)
+// ═══════════════════════════════════════════════════════════════════════════════
+void parseSerialInput() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+
+    if (!inFrame) {
+      if (c == STX) {
+        inFrame = true;
+        rxLen   = 0;
+        memset(rxBuf, 0, sizeof(rxBuf));
+        Serial.println(rxAckSTX);   // ack start marker
+      }
+      // anything before STX is silently ignored
+      continue;
+    }
+
+    // Inside frame
+    if (c == ETX) {
+      inFrame = false;
+      Serial.println(rxAckETX);   // ack end marker
+      processFrame(rxBuf, rxLen);
+      rxLen = 0;
+      continue;
+    }
+
+    // Buffer overflow guard
+    if (rxLen < RX_BUF_SIZE - 1) {
+      rxBuf[rxLen++] = c;
+      rxBuf[rxLen]   = '\0';
+      Serial.println(rxAckCh);    // ack each character received
+    }
+  }
+}
+
+// ─── Frame processor ─────────────────────────────────────────────────────────
+// Called once a complete frame (contents between < >) has been collected.
+void processFrame(const char* buf, uint8_t len) {
+  if (len < 2) return;   // minimum: CamId + command
+
+  // --- Byte 0: camera ID ---
+  char camChar = buf[0];
+  int8_t camIdx = -1;
+  if      (camChar == cam1Id) camIdx = 0;
+  else if (camChar == cam2Id) camIdx = 1;
+  else if (camChar == cam3Id) camIdx = 2;
+
+  if (camIdx < 0) {
+    Serial.println("ERR:CAMID");
+    return;
+  }
+
+  // Ack camera ID
+  Serial.print(rxAckCID);
+  Serial.print('\r');
+  Serial.println();
+
+  // Switch active camera if changed; release pan/tilt of previous
+  if (camIdx != activeCam) {
+    if (activeCam >= 0) releasePanTilt((uint8_t)activeCam);
+    activeCam = camIdx;
+  }
+
+  // --- Byte 1: command character ---
+  char cmd = buf[1];
+
+  switch (cmd) {
+
+    case CMD_PAN_LEFT:
+      actuatePanTilt((uint8_t)camIdx, panLeftPin[camIdx]);
+      break;
+
+    case CMD_PAN_RIGHT:
+      actuatePanTilt((uint8_t)camIdx, panRightPin[camIdx]);
+      break;
+
+    case CMD_TILT_UP:
+      actuatePanTilt((uint8_t)camIdx, tiltUpPin[camIdx]);
+      break;
+
+    case CMD_TILT_DOWN:
+      actuatePanTilt((uint8_t)camIdx, tiltDownPin[camIdx]);
+      break;
+
+    case CMD_STOP:
+      releasePanTilt((uint8_t)camIdx);
+      break;
+
+    case CMD_LANC:
+      // Expect 2 more hex bytes in buf[2..3] and buf[4..5] (spaces optional)
+      // Strip spaces to collect hex chars
+      {
+        char hexStr[5] = { 0 };
+        uint8_t hi = 2;
+        uint8_t hIdx = 0;
+        while (hi < len && hIdx < 4) {
+          if (buf[hi] != ' ') hexStr[hIdx++] = buf[hi];
+          hi++;
+        }
+        if (hIdx < 4) { Serial.println("ERR:LANC_DATA"); break; }
+
+        uint8_t b1 = (uint8_t)strtol((char[]){hexStr[0], hexStr[1], '\0'}, NULL, 16);
+        uint8_t b2 = (uint8_t)strtol((char[]){hexStr[2], hexStr[3], '\0'}, NULL, 16);
+        queueLancCommand(b1, b2, 2);
+      }
+      break;
+
+    default:
+      Serial.println("ERR:CMD");
+      break;
+  }
+}
+
+// ─── Queue a LANC command for the ISR ────────────────────────────────────────
+void queueLancCommand(uint8_t b1, uint8_t b2, uint8_t len) {
+  if (activeCam < 0) return;
+  // Spin-wait if ISR is still transmitting (very short — max 2×10 bits at 9600)
+  while (lancBusy);
+  lancCmdOutPin       = lancCmdPin[activeCam];
+  lancPendingBuf[0]   = b1;
+  lancPendingBuf[1]   = b2;
+  lancPendingLen      = len;
+  lancCmdPending      = true;   // ISR picks this up on next tick
+}

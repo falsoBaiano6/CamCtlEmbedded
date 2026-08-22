@@ -1,0 +1,1 @@
+This is a good start.  However, the LANC output routine is blocking, and code is missing (init routine, parsing routine for incoming command data from the host via virtual serial port, etc.) Please redo using an interrupt-driven ap-proach to generating LANC commands, and please include the command parsing and init code.  

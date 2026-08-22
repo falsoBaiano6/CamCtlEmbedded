@@ -1,0 +1,36 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// setup()
+// ═══════════════════════════════════════════════════════════════════════════════
+void setup() {
+  initHardware();   // defined in init routine above
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// loop()
+// ═══════════════════════════════════════════════════════════════════════════════
+void loop() {
+  // 1. Service incoming USB-serial frames from host
+  parseSerialInput();
+
+  // 2. If host disconnects (DTR dropped), reset state and wait for reconnect
+  if (hostConnected && !Serial) {
+    hostConnected = false;
+    activeCam     = -1;
+    releaseAllPanTilt();
+    Serial.println("DISCONNECTED");
+    // Spin until host reconnects and sends '!'
+    while (true) {
+      if (Serial && Serial.available()) {
+        char c = (char)Serial.read();
+        if (c == HostListeningCode) {
+          hostConnected = true;
+          Serial.println("Arduino LANC to USB-serial interface v1.0");
+          break;
+        }
+      }
+    }
+  }
+
+  // 3. No other blocking work here — LANC TX is handled entirely by lancTimerISR,
+  //    and pan/tilt pins are set directly inside processFrame().
+}

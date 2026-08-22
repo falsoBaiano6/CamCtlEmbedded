@@ -1,0 +1,4 @@
+OK.  That code looks like it handles the interrupt-driven LANC traffic. Please generate code for:
+
+1) a command parsing routine for incoming fielding command traffic from the host via the virrtual USB port
+2) an init routine for the Arduino UNO R4 Wifi.

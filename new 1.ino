@@ -31,7 +31,6 @@
 #define CMD_TILT_UP     'U'
 #define CMD_TILT_DOWN   'D'
 #define CMD_PAN_STOP    'S'   // release all pan/tilt for active camera
-#define CMD_LANC        'Z' 
 
 // ─── Pin assignments ─────────────────────────────────────────────────────────
 // CAM1
@@ -116,7 +115,6 @@ volatile uint8_t  lancCmdByte2   = 0x00;   // second LANC byte (if needed)
 volatile bool    lancCmdPending = false;
 volatile uint8_t lancPendingBuf[2];
 volatile uint8_t lancPendingLen = 0;
-volatile uint8_t lancCmdPinState = 0;
 
 FspTimer lancTimer;
 
@@ -125,7 +123,14 @@ FspTimer lancTimer;
 static char  rxBuf[RX_BUF_SIZE];
 static uint8_t rxBufIdx  = 0;
 static bool  inFrame     = false;
-static uint8_t rxLen = 0;
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// setup()
+// ═══════════════════════════════════════════════════════════════════════════════
+void setup() {
+  initHardware();   // defined in init routine above
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -143,14 +148,13 @@ void lancTimerISR(timer_callback_args_t __attribute__((unused)) *args) {
       lancBitTick     = 0;
       lancCmdPending  = false;
       lancBusy        = true;
-      // pin is already set OUTPUT + LOW (idle) in queueLancCommand()
+      // pin is already set OUTPUT + HIGH (idle) in queueLancCommand()
     }
     return;
   }
 
   uint8_t pin  = lancActiveCmdPin;
   uint8_t tick = lancBitTick;           //
-}
 
 // Release all pan/tilt pins to HIGH-Z (INPUT, no pull-up)
 void releaseAllPanTilt() {
@@ -296,7 +300,7 @@ void processFrame(const char* buf, uint8_t len) {
       actuatePanTilt((uint8_t)camIdx, tiltDownPin[camIdx]);
       break;
 
-    case CMD_PAN_STOP:
+    case CMD_STOP:
       releasePanTilt((uint8_t)camIdx);
       break;
 
@@ -313,11 +317,8 @@ void processFrame(const char* buf, uint8_t len) {
         }
         if (hIdx < 4) { Serial.println("ERR:LANC_DATA"); break; }
 
-        char temp1[3] = { hexStr[0], hexStr[1], '\0' };
-        uint8_t b1 = (uint8_t)strtol(temp1, NULL, 16);
-        char temp2[3] = {hexStr[2], hexStr[3], '\0'};
-        uint8_t b2 = (uint8_t)strtol(temp2, NULL, 16);
-
+        uint8_t b1 = (uint8_t)strtol((char[]){hexStr[0], hexStr[1], '\0'}, NULL, 16);
+        uint8_t b2 = (uint8_t)strtol((char[]){hexStr[2], hexStr[3], '\0'}, NULL, 16);
         queueLancCommand(b1, b2, 2);
       }
       break;
@@ -333,18 +334,11 @@ void queueLancCommand(uint8_t b1, uint8_t b2, uint8_t len) {
   if (activeCam < 0) return;
   // Spin-wait if ISR is still transmitting (very short — max 2×10 bits at 9600)
   while (lancBusy);
-  lancCmdPinState      = lancCmdPin[activeCam];
+  lancCmdOutPin       = lancCmdPin[activeCam];
   lancPendingBuf[0]   = b1;
   lancPendingBuf[1]   = b2;
   lancPendingLen      = len;
   lancCmdPending      = true;   // ISR picks this up on next tick
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// setup()
-// ═══════════════════════════════════════════════════════════════════════════════
-void setup() {
-  initHardware();   // defined in init routine above
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -390,10 +384,10 @@ void initHardware() {
   // --- Pan/tilt pins: all HIGH-Z by default ---
   releaseAllPanTilt();
 
-  // --- LANC CMD pins: OUTPUT, idle LOW ---
+  // --- LANC CMD pins: OUTPUT, idle HIGH ---
   for (uint8_t i = 0; i < 3; i++) {
     pinMode(lancCmdPin[i], OUTPUT);
-    digitalWrite(lancCmdPin[i], LOW);
+    digitalWrite(lancCmdPin[i], HIGH);
   }
 
   // --- LANC SIG_IN pins: INPUT, pull-up (LANC bus is active-low) ---

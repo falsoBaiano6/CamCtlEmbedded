@@ -1,0 +1,124 @@
+/*
+ * Arduino UNO R4 WiFi — USB-Serial to LANC + Pan/Tilt Interface v1.0
+ *
+ * - Host handshake over USB virtual COM (Serial), framed with '<' '>'.
+ * - LANC command output is interrupt-driven using a hardware timer (AGT0).
+ * - LANC SIG_IN pins are monitored via pin-change / external interrupts.
+ * - Pan/Tilt outputs default to HIGH-Z; driven LOW when actuated.
+ * - Only one LANC port is active at a time.
+ */
+
+#include "FspTimer.h"   // RA4M1 FSP timer wrapper bundled with UNO R4 core
+
+// ─── Protocol constants ───────────────────────────────────────────────────────
+#define HostListeningCode '!'
+#define STX               '<'
+#define ETX               '>'
+
+#define rxAckSTX  "FE"
+#define rxAckCh   "AA"
+#define rxAckETX  "EF"
+static const char rxAckCID = '@';
+
+#define cam1Id    '1'
+#define cam2Id    '2'
+#define cam3Id    '3'
+
+// ─── Pan/Tilt command codes ───────────────────────────────────────────────────
+#define CMD_PAN_LEFT    'L'
+#define CMD_PAN_RIGHT   'R'
+#define CMD_TILT_UP     'U'
+#define CMD_TILT_DOWN   'D'
+#define CMD_STOP        'S'   // release all pan/tilt for active camera
+
+// ─── Pin assignments ──────────────────────────────────────────────────────────
+#define CAM1_LANC_CMD_OUT   5
+#define CAM1_LANC_SIG_IN   18
+#define CAM1_PAN_LEFT      10
+#define CAM1_PAN_RIGHT     11
+#define CAM1_TILT_DOWN     12
+#define CAM1_TILT_UP       13
+
+#define CAM2_LANC_CMD_OUT   6
+#define CAM2_LANC_SIG_IN   16
+#define CAM2_PAN_LEFT      17
+#define CAM2_PAN_RIGHT      7
+#define CAM2_TILT_DOWN      8
+#define CAM2_TILT_UP       15
+
+#define CAM3_LANC_CMD_OUT   9
+#define CAM3_LANC_SIG_IN   14
+#define CAM3_PAN_LEFT       2
+#define CAM3_PAN_RIGHT      3
+#define CAM3_TILT_DOWN      4
+#define CAM3_TILT_UP       19
+
+// ─── Pin lookup tables (index: 0=CAM1, 1=CAM2, 2=CAM3) ───────────────────────
+const uint8_t lancCmdPin[3]  = { CAM1_LANC_CMD_OUT, CAM2_LANC_CMD_OUT, CAM3_LANC_CMD_OUT };
+const uint8_t lancSigPin[3]  = { CAM1_LANC_SIG_IN,  CAM2_LANC_SIG_IN,  CAM3_LANC_SIG_IN  };
+const uint8_t panLeftPin[3]  = { CAM1_PAN_LEFT,     CAM2_PAN_LEFT,     CAM3_PAN_LEFT      };
+const uint8_t panRightPin[3] = { CAM1_PAN_RIGHT,    CAM2_PAN_RIGHT,    CAM3_PAN_RIGHT     };
+const uint8_t tiltUpPin[3]   = { CAM1_TILT_UP,      CAM2_TILT_UP,      CAM3_TILT_UP       };
+const uint8_t tiltDownPin[3] = { CAM1_TILT_DOWN,    CAM2_TILT_DOWN,    CAM3_TILT_DOWN     };
+
+const uint8_t allPanTiltPins[] = {
+  CAM1_PAN_LEFT, CAM1_PAN_RIGHT, CAM1_TILT_UP, CAM1_TILT_DOWN,
+  CAM2_PAN_LEFT, CAM2_PAN_RIGHT, CAM2_TILT_UP, CAM2_TILT_DOWN,
+  CAM3_PAN_LEFT, CAM3_PAN_RIGHT, CAM3_TILT_UP, CAM3_TILT_DOWN
+};
+
+// ─── LANC timing ──────────────────────────────────────────────────────────────
+// LANC runs at 9600 baud → 1 bit = 104.167 µs.
+// Timer fires every half-bit (52 µs) so we can sample at mid-bit as well.
+// Each LANC frame = start bit + 8 data bits + stop bit = 10 half-bit pairs = 20 ticks.
+// Two bytes per frame → 40 ticks total.
+#define LANC_HALF_BIT_US  52u
+#define LANC_BITS_PER_BYTE 10u   // start + 8 data + stop
+#define LANC_TICKS_PER_BYTE (LANC_BITS_PER_BYTE * 2u)   // 20 half-bit ticks
+
+// ─── LANC ISR state ───────────────────────────────────────────────────────────
+volatile bool    lancBusy       = false;
+volatile uint8_t lancTxBuf[2]   = { 0x00, 0x00 };  // up to 2 bytes per frame
+volatile uint8_t lancTxLen      = 0;                // 1 or 2 bytes
+volatile uint8_t lancByteIdx    = 0;                // which byte we are on
+volatile uint8_t lancBitTick    = 0;                // half-bit tick within current byte
+volatile uint8_t lancActiveCmdPin = 0xFF;           // pin currently being driven
+
+// Pending command loaded by main loop
+volatile bool    lancCmdPending = false;
+volatile uint8_t lancPendingBuf[2];
+volatile uint8_t lancPendingLen = 0;
+
+FspTimer lancTimer;
+
+// ─── Application state ────────────────────────────────────────────────────────
+int8_t  activeCam     = -1;   // 0-based index; -1 = none
+bool    hostConnected = false;
+
+// ─── Serial receive buffer ────────────────────────────────────────────────────
+#define RX_BUF_SIZE 8
+static char  rxBuf[RX_BUF_SIZE];
+static uint8_t rxBufIdx  = 0;
+static bool  inFrame     = false;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LANC timer ISR  (fires every LANC_HALF_BIT_US)
+// ═══════════════════════════════════════════════════════════════════════════════
+void lancTimerISR(timer_callback_args_t __attribute__((unused)) *args) {
+  if (!lancBusy) {
+    // Check if main loop queued a new command
+    if (lancCmdPending) {
+      lancTxBuf[0]    = lancPendingBuf[0];
+      lancTxBuf[1]    = lancPendingBuf[1];
+      lancTxLen       = lancPendingLen;
+      lancByteIdx     = 0;
+      lancBitTick     = 0;
+      lancCmdPending  = false;
+      lancBusy        = true;
+      // pin is already set OUTPUT + HIGH (idle) in queueLancCommand()
+    }
+    return;
+  }
+
+  uint8_t pin  = lancActiveCmdPin;
+  uint8_t tick = lancBitTick;           //
