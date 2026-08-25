@@ -10,6 +10,8 @@
  */
 
 #include "FspTimer.h"   // RA4M1 FSP timer wrapper bundled with UNO R4 core
+#include <WiFiS3.h>
+#include <WiFiUdp.h>
 
 // ─── Protocol constants ──────────────────────────────────────────────────────
 #define HostListeningCode '!'
@@ -88,6 +90,9 @@ const uint8_t allPanTiltPins[] = {
   CAM3_PAN_LEFT, CAM3_PAN_RIGHT, CAM3_TILT_UP, CAM3_TILT_DOWN
 };
 
+const uint8_t lancCIDValues[3] = { cam1Id, cam2Id, cam3Id }
+const uint8_t ptCIDValues[3] = { cam4Id, cam5Id, cam6Id }
+
 // ─── LANC timing ──────────────────────────────────────────────────────────────
 // LANC runs at 9600 baud → 1 bit = 104.167 µs.
 // Timer fires every half-bit (52 µs) so we can sample at mid-bit as well.
@@ -110,6 +115,18 @@ volatile uint8_t lancBitTick    = 0;                // half-bit tick within curr
 volatile uint8_t lancActiveCmdPin = 0xFF;           // pin currently being driven
 
 // ─── LANC frame state (interrupt-driven, one camera active) ──────────────────
+
+enum FrameState {
+    IDLE,
+    CID,
+    LANC_DATA,
+    PT_DATA
+};
+
+FrameState currentState = IDLE;
+static bool validLancCam = false;
+static bool validPtCam = false;
+
 volatile uint8_t  lancCmdByte    = 0x00;   // command byte to transmit
 volatile uint8_t  lancCmdByte2   = 0x00;   // second LANC byte (if needed)
 // Pending command loaded by main loop
@@ -121,9 +138,9 @@ volatile uint8_t lancCmdPinState = 0;
 FspTimer lancTimer;
 
 // ─── Serial receive buffer ────────────────────────────────────────────────────
-#define RX_BUF_SIZE 8
-static char  rxBuf[RX_BUF_SIZE];
-static uint8_t rxBufIdx  = 0;
+#define RX_DATA_BUF_SIZE 8
+static char  rxDataBuf[RX_BUF_SIZE];
+static uint8_t rxDataBufIdx  = 0;
 static bool  inFrame     = false;
 static uint8_t rxLen = 0;
 
@@ -205,6 +222,26 @@ void dispatchLancCommand() {
   lancCmdPending = false;
 }
 
+// Functions to check membership
+bool isValidLancCam(uint8_t target) {
+  for (uint8_t i = 0; i < 3; i++) {
+    if (lancCIDValues[i] == target) {
+      return true; // Found a match
+    }
+  }
+  return false; // Checked everything, no match
+}
+
+bool isValidPtCam(uint8_t target) {
+  for (uint8_t i = 0; i < 3; i++) {
+    if (ptCIDValues[i] == target) {
+      return true; // Found a match
+    }
+  }
+  return false; // Checked everything, no match
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // COMMAND PARSING ROUTINE
 // Call from loop(); accumulates chars, acts on complete '<...>' frames.
@@ -217,33 +254,57 @@ void dispatchLancCommand() {
 void parseSerialInput() {
   while (Serial.available()) {
     char c = (char)Serial.read();
-
-    if (!inFrame) {
+    switch (currentState) {
+    case FrameState::IDLE:
       if (c == STX) {
-        inFrame = true;
         rxLen   = 0;
-        memset(rxBuf, 0, sizeof(rxBuf));
+        memset(rxDataBuf, 0, sizeof(rxDataBuf));
         Serial.println(rxAckSTX);   // ack start marker
+        currentState = State::CID;
       }
       // anything before STX is silently ignored
-      continue;
-    }
+      break;
 
-    // Inside frame
-    if (c == ETX) {
-      inFrame = false;
-      Serial.println(rxAckETX);   // ack end marker
-      processFrame(rxBuf, rxLen);
-      rxLen = 0;
-      continue;
-    }
+    case FrameState::CID:
+      validLancCam = isValidLancCam(c);
+      validPtCam = isValidPtCam(c);
+      if (validLancCam) {
+        Serial.println(rxAckCID);   // ack CID
+        currentState = State::LANC_DATA;
+      }
+      if (validPtCam) {
+        Serial.println(rxAckCID);   // ack CID
+        currentState = State::PT_DATA;
+      }
+      break;
 
-    // Buffer overflow guard
-    if (rxLen < RX_BUF_SIZE - 1) {
-      rxBuf[rxLen++] = c;
-      rxBuf[rxLen]   = '\0';
-      Serial.println(rxAckCh);    // ack each character received
-    }
+    case FrameState::LANC_DATA:
+      // Buffer overflow guard
+      if (rxLen < RX_DATA_BUF_SIZE - 1) {
+        rxDataBuf[rxLen++] = c;
+        rxDataBuf[rxLen]   = '\0';
+        Serial.println(rxAckCh);    // ack each character received
+      }
+      if (c == ETX) {
+        Serial.println(rxAckETX);   // ack end marker
+        processFrame(rxBuf, rxLen);
+        rxLen = 0;
+        currentState = FrameState::IDLE;
+      }
+      break;
+    case State::PT_DATA:
+      // Buffer overflow guard
+        rxDataBuf[rxLen++] = c;
+        rxDataBuf[rxLen]   = '\0';
+        Serial.println(rxAckCh);    // ack each character received
+      }
+      if (c == ETX) {
+        Serial.println(rxAckETX);   // ack end marker
+        processFrame(rxBuf, rxLen);
+        rxLen = 0;
+        currentState = FrameState::IDLE;
+      }
+      break;
   }
 }
 
@@ -383,6 +444,7 @@ void loop() {
 void initHardware() {
   // --- Serial (USB virtual COM) ---
   Serial.begin(115200);
+  delay(2500); 
   // Wait for host to open port (native USB)
   uint32_t t = millis();
   while (!Serial && (millis() - t < 5000));
