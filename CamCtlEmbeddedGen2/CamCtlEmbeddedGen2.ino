@@ -147,6 +147,7 @@ FspTimer lancTimer;
 
 // ─── Serial receive buffer ────────────────────────────────────────────────────
 #define RX_DATA_BUF_SIZE 8
+#define RX_LANC_DATA_START_IX 2
 static char  rxDataBuf[RX_DATA_BUF_SIZE];
 static uint8_t rxDataBufIdx  = 0;
 static bool  inFrame     = false;
@@ -341,6 +342,7 @@ void parseSerialInput() {
     case FrameState::CID:
       validCamId = isValidCamId(c);
       if (validCamId) {
+        rxDataBuf[rxDataLen++] = c;
         Serial.println(rxAckCID);   // ack CID
         currentState = FrameState::CMD;
       }
@@ -352,8 +354,9 @@ void parseSerialInput() {
     case FrameState::CMD:
       validCmd = isValidCmd(c);
       if (validCmd) {
+        rxDataBuf[rxDataLen++] = c;
         Serial.println(rxAckCMD);   // ack CID
-        currentState = FrameState::CMD;
+        currentState = FrameState::DATA;
       }
 	  else {
         currentState = FrameState::IDLE;
@@ -393,15 +396,12 @@ void processFrame(const char* buf, uint8_t len) {
   else if (camChar == cam2Id) camIdx = 1;
   else if (camChar == cam3Id) camIdx = 2;
 
-  if (camIdx < 0) {
+  if ((camIdx >= NUM_CAMERAS) 
+  ||
+  (camIdx < 0)) {
     Serial.println("ERR:CAMID");
     return;
   }
-
-  // Ack camera ID
-  Serial.print(rxAckCID);
-  Serial.print('\r');
-  Serial.println();
 
   // Switch active camera if changed; release pan/tilt of previous
   if (camIdx != activeCam) {
