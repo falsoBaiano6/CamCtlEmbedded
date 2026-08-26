@@ -1,0 +1,59 @@
+// Define variables shared between ISR and main loop
+// Volatile ensures the compiler reads the true hardware state
+volatile unsigned long lancTime = 0;
+volatile bool lancPinHigh = false;
+
+// Define your LANC pin (UNO R4 supports interrupts on most pins)
+const byte cam3LancPin = 2; 
+
+void setup() {
+  pinMode(cam3LancPin, INPUT);
+  
+  // Initialize the baseline state
+  if (digitalRead(cam3LancPin) == HIGH) {
+    lancPinHigh = true;
+    lancTime = micros();
+  }
+
+  // Attach interrupt to handle any pin state transitions
+  attachInterrupt(digitalPinToInterrupt(cam3LancPin), cam3LancISR, CHANGE);
+}
+
+void loop() {
+  // Main code runs completely non-blocking here
+  
+  if (checkLancReady()) {
+    // 5ms window detected! Put your LANC frame transmission logic here
+  }
+}
+
+// ISR triggered instantly when pin changes HIGH <-> LOW
+void cam3LancISR() {
+  // Read the pin state directly using digitalRead
+  if (digitalRead(cam3LancPin) == HIGH) {
+    lancPinHigh = true;
+    lancTime = micros(); // Mark the start of the HIGH signal
+  } else {
+    lancPinHigh = false; // Pin dropped LOW; resets the timing window
+  }
+}
+
+// Evaluation function to check if the 5ms condition is satisfied
+bool checkLancReady() {
+  // Disable interrupts briefly to safely copy volatile variables
+  noInterrupts();
+  bool isHigh = lancPinHigh;
+  unsigned long startTime = lancTime;
+  interrupts();
+
+  if (!isHigh) {
+    return false; 
+  }
+  
+  // Verify if 5000 microseconds (5ms) have elapsed
+  if (micros() - startTime >= 5000) {
+    return true; 
+  }
+  
+  return false;
+}

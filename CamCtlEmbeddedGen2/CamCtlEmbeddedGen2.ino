@@ -22,12 +22,13 @@
 #define rxAckCh   "AA"
 #define rxAckETX  "EF"
 #define rxAckCID  '@'
+#define rxAckCMD  '$'
 
 #define cam1Id    '1'
 #define cam2Id    '2'
 #define cam3Id    '3'
 
-// ─── Pan/Tilt command codes (placeholders — assign when selected) ─────────────
+// ─── Command codes ─────────────
 #define CMD_PAN_LEFT    'L'
 #define CMD_PAN_RIGHT   'R'
 #define CMD_TILT_UP     'U'
@@ -59,7 +60,7 @@
 #define CAM3_PAN_RIGHT      3
 #define CAM3_TILT_DOWN      4
 #define CAM3_TILT_UP       19
-
+#define NUM_CAMERAS         3
 // LANC Wire color pin assignment:
 // Tip -- White
 // Ring -- Red
@@ -72,17 +73,17 @@
 // Medium: 28 04
 // Fastest: 28 0E
 // Zoom Out (Wide):
-// Slowest: 28 10
+// Slowest: 28 10in
 // Medium: 28 14
 // Fastest: 28 1E
 
 // ─── Pin lookup tables (index: 0=CAM1, 1=CAM2, 2=CAM3) ───────────────────────
-const uint8_t lancCmdPin[3]  = { CAM1_LANC_CMD_OUT, CAM2_LANC_CMD_OUT, CAM3_LANC_CMD_OUT };
-const uint8_t lancSigPin[3]  = { CAM1_LANC_SIG_IN,  CAM2_LANC_SIG_IN,  CAM3_LANC_SIG_IN  };
-const uint8_t panLeftPin[3]  = { CAM1_PAN_LEFT,  CAM2_PAN_LEFT,  CAM3_PAN_LEFT  };
-const uint8_t panRightPin[3] = { CAM1_PAN_RIGHT, CAM2_PAN_RIGHT, CAM3_PAN_RIGHT };
-const uint8_t tiltUpPin[3]   = { CAM1_TILT_UP,   CAM2_TILT_UP,   CAM3_TILT_UP   };
-const uint8_t tiltDownPin[3] = { CAM1_TILT_DOWN, CAM2_TILT_DOWN, CAM3_TILT_DOWN };
+const uint8_t lancCmdPin[NUM_CAMERAS]  = { CAM1_LANC_CMD_OUT, CAM2_LANC_CMD_OUT, CAM3_LANC_CMD_OUT };
+const uint8_t lancSigPin[NUM_CAMERAS]  = { CAM1_LANC_SIG_IN,  CAM2_LANC_SIG_IN,  CAM3_LANC_SIG_IN  };
+const uint8_t panLeftPin[NUM_CAMERAS]  = { CAM1_PAN_LEFT,  CAM2_PAN_LEFT,  CAM3_PAN_LEFT  };
+const uint8_t panRightPin[NUM_CAMERAS] = { CAM1_PAN_RIGHT, CAM2_PAN_RIGHT, CAM3_PAN_RIGHT };
+const uint8_t tiltUpPin[NUM_CAMERAS]   = { CAM1_TILT_UP,   CAM2_TILT_UP,   CAM3_TILT_UP   };
+const uint8_t tiltDownPin[NUM_CAMERAS] = { CAM1_TILT_DOWN, CAM2_TILT_DOWN, CAM3_TILT_DOWN };
 
 const uint8_t allPanTiltPins[] = {
   CAM1_PAN_LEFT, CAM1_PAN_RIGHT, CAM1_TILT_UP, CAM1_TILT_DOWN,
@@ -90,8 +91,10 @@ const uint8_t allPanTiltPins[] = {
   CAM3_PAN_LEFT, CAM3_PAN_RIGHT, CAM3_TILT_UP, CAM3_TILT_DOWN
 };
 
-const uint8_t lancCIDValues[3] = { cam1Id, cam2Id, cam3Id }
-const uint8_t ptCIDValues[3] = { cam4Id, cam5Id, cam6Id }
+const uint8_t validCamValues[NUM_CAMERAS] = { cam1Id, cam2Id, cam3Id };
+#define NUM_COMMANDS 6
+const uint8_t validCmdValues[NUM_COMMANDS] = { CMD_PAN_LEFT, CMD_PAN_RIGHT, CMD_TILT_UP, CMD_TILT_DOWN, CMD_PAN_STOP, CMD_LANC }; 
+volatile uint8_t activeLancSigPin = CAM1_LANC_SIG_IN;
 
 // ─── LANC timing ──────────────────────────────────────────────────────────────
 // LANC runs at 9600 baud → 1 bit = 104.167 µs.
@@ -119,30 +122,40 @@ volatile uint8_t lancActiveCmdPin = 0xFF;           // pin currently being drive
 enum FrameState {
     IDLE,
     CID,
-    LANC_DATA,
-    PT_DATA
+    CMD,
+    DATA
 };
 
 FrameState currentState = IDLE;
-static bool validLancCam = false;
-static bool validPtCam = false;
+static bool validCamId = false;
+static bool validCmd = false;
 
 volatile uint8_t  lancCmdByte    = 0x00;   // command byte to transmit
 volatile uint8_t  lancCmdByte2   = 0x00;   // second LANC byte (if needed)
+
 // Pending command loaded by main loop
 volatile bool    lancCmdPending = false;
 volatile uint8_t lancPendingBuf[2];
 volatile uint8_t lancPendingLen = 0;
 volatile uint8_t lancCmdPinState = 0;
 
+// variables tracking the LANC start timing state
+volatile unsigned long lancTime = 0;
+volatile bool lancPinHigh = false;
+
 FspTimer lancTimer;
 
 // ─── Serial receive buffer ────────────────────────────────────────────────────
 #define RX_DATA_BUF_SIZE 8
-static char  rxDataBuf[RX_BUF_SIZE];
+static char  rxDataBuf[RX_DATA_BUF_SIZE];
 static uint8_t rxDataBufIdx  = 0;
 static bool  inFrame     = false;
-static uint8_t rxLen = 0;
+static uint8_t rxDataLen = 0;
+
+// LANC char buffer
+#define NUM_LANC_DATA_CHARS 5
+static char lancDataCharBuf[NUM_LANC_DATA_CHARS];
+static boolean lancCmd[16];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -223,31 +236,91 @@ void dispatchLancCommand() {
 }
 
 // Functions to check membership
-bool isValidLancCam(uint8_t target) {
-  for (uint8_t i = 0; i < 3; i++) {
-    if (lancCIDValues[i] == target) {
+bool isValidCamId(uint8_t target) {
+  for (uint8_t i = 0; i < NUM_CAMERAS; i++) {
+    if (validCamValues[i] == target) {
       return true; // Found a match
     }
   }
   return false; // Checked everything, no match
 }
 
-bool isValidPtCam(uint8_t target) {
-  for (uint8_t i = 0; i < 3; i++) {
-    if (ptCIDValues[i] == target) {
+bool isValidCmd(uint8_t target) {
+  for (uint8_t i = 0; i < NUM_COMMANDS; i++) {
+    if (validCmdValues[i] == target) {
       return true; // Found a match
     }
   }
   return false; // Checked everything, no match
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// COMMAND PARSING ROUTINE
+// LANC input ISR  (fires every time the active pin transitions)
+// ═══════════════════════════════════════════════════════════════════════════════
+// ISR triggered instantly when the active pin transitions
+void lancStartISR() {
+  if (digitalRead(activeLancSigPin) == HIGH) {
+    lancPinHigh = true;
+    lancTime = micros(); 
+  } else {
+    lancPinHigh = false; 
+  }
+}
+
+// Function to safely swap pins at runtime
+void changeLancPin(byte newPin) {
+  // 1. Remove interrupt from the old pin
+  detachInterrupt(digitalPinToInterrupt(activeLancSigPin));
+  
+  // 2. Set the new pin variable
+  activeLancSigPin = newPin;
+  
+  // 3. Initialize and attach the new pin
+  initLancPin(activeLancSigPin);
+}
+
+// Helper to configure a pin and set baseline states
+void initLancPin(byte pin) {
+  pinMode(pin, INPUT);
+  
+  // Clear states before attaching to avoid false triggers
+  noInterrupts();
+  if (digitalRead(pin) == HIGH) {
+    lancPinHigh = true;
+    lancTime = micros();
+  } else {
+    lancPinHigh = false;
+  }
+  interrupts();
+
+  // Attach the shared ISR function to the new pin
+  attachInterrupt(digitalPinToInterrupt(pin), lancStartISR, CHANGE);
+}
+
+// Non-blocking evaluation function
+bool checkLancReady() {
+  noInterrupts();
+  bool isHigh = lancPinHigh;
+  unsigned long startTime = lancTime;
+  interrupts();
+
+  if (!isHigh) {
+    return false; 
+  }
+  
+  if (micros() - startTime >= 5000) {
+    return true; 
+  }
+  
+  return false;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FRAME PARSING ROUTINE
 // Call from loop(); accumulates chars, acts on complete '<...>' frames.
 //
 // Supported frame formats:
-//   <CamId D>            select camera + pan/tilt:  e.g. <1U> <2L> <3S>
+//   <CamId D>            select camera + pan/tilt command:  e.g. <1U> <2L> <3S>
 //   <CamId Z B1 B2>      raw LANC, two hex bytes:   e.g. <1Z 28 00>
 //   (spaces in LANC frame are optional / ignored)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -257,54 +330,54 @@ void parseSerialInput() {
     switch (currentState) {
     case FrameState::IDLE:
       if (c == STX) {
-        rxLen   = 0;
+        rxDataLen   = 0;
         memset(rxDataBuf, 0, sizeof(rxDataBuf));
         Serial.println(rxAckSTX);   // ack start marker
-        currentState = State::CID;
+        currentState = FrameState::CID;
       }
       // anything before STX is silently ignored
       break;
 
     case FrameState::CID:
-      validLancCam = isValidLancCam(c);
-      validPtCam = isValidPtCam(c);
-      if (validLancCam) {
+      validCamId = isValidCamId(c);
+      if (validCamId) {
         Serial.println(rxAckCID);   // ack CID
-        currentState = State::LANC_DATA;
+        currentState = FrameState::CMD;
       }
-      if (validPtCam) {
-        Serial.println(rxAckCID);   // ack CID
-        currentState = State::PT_DATA;
-      }
+      else {
+        currentState = FrameState::IDLE;
+      } 
       break;
 
-    case FrameState::LANC_DATA:
-      // Buffer overflow guard
-      if (rxLen < RX_DATA_BUF_SIZE - 1) {
-        rxDataBuf[rxLen++] = c;
-        rxDataBuf[rxLen]   = '\0';
-        Serial.println(rxAckCh);    // ack each character received
+    case FrameState::CMD:
+      validCmd = isValidCmd(c);
+      if (validCmd) {
+        Serial.println(rxAckCMD);   // ack CID
+        currentState = FrameState::CMD;
       }
+	  else {
+        currentState = FrameState::IDLE;
+	  }
+    break;
+
+    case FrameState::DATA:
       if (c == ETX) {
         Serial.println(rxAckETX);   // ack end marker
-        processFrame(rxBuf, rxLen);
-        rxLen = 0;
+        processFrame(rxDataBuf,rxDataLen);
+        rxDataLen = 0;
         currentState = FrameState::IDLE;
       }
+      else { 
+        // capture outgoing LANC data   
+        // Buffer overflow guard
+        if (rxDataLen < RX_DATA_BUF_SIZE - 1) {
+          rxDataBuf[rxDataLen++] = c;
+          rxDataBuf[rxDataLen]   = '\0';
+          Serial.println(rxAckCh);    // ack each character received
+        }
+      }      
       break;
-    case State::PT_DATA:
-      // Buffer overflow guard
-        rxDataBuf[rxLen++] = c;
-        rxDataBuf[rxLen]   = '\0';
-        Serial.println(rxAckCh);    // ack each character received
-      }
-      if (c == ETX) {
-        Serial.println(rxAckETX);   // ack end marker
-        processFrame(rxBuf, rxLen);
-        rxLen = 0;
-        currentState = FrameState::IDLE;
-      }
-      break;
+    }
   }
 }
 
@@ -334,6 +407,7 @@ void processFrame(const char* buf, uint8_t len) {
   if (camIdx != activeCam) {
     if (activeCam >= 0) releasePanTilt((uint8_t)activeCam);
     activeCam = camIdx;
+    changeLancPin(activeCam);
   }
 
   // --- Byte 1: command character ---
@@ -432,6 +506,9 @@ void loop() {
         }
       }
     }
+    if (checkLancReady()) {
+    // 5ms window detected on the active pin!
+    }
   }
 
   // 3. No other blocking work here — LANC TX is handled entirely by lancTimerISR,
@@ -480,7 +557,9 @@ void initHardware() {
   activeCam     = -1;
   hostConnected = false;
   inFrame       = false;
-  rxLen         = 0;
+  rxDataLen     = 0;
+
+  initLancPin(activeLancSigPin);
 
   // --- Host handshake ---
   // Wait for HostListeningCode '!'
@@ -493,6 +572,77 @@ void initHardware() {
         break;
       }
     }
+  }
+}
+
+void flushSerialBuffer() {
+  // flush the serial input buffer
+  while (Serial.available() > 0) {
+    Serial.read();
+  }
+}
+
+boolean hexchartobitarray() {
+  // This function converts the hex char LANC command and fills the lancCmd array with the bits in LSB-first order
+
+  int byte1, byte2;
+
+  for (int i = 0; i < 4; i++) {
+    if (!(isHexadecimalDigit(lancDataCharBuf[i]))) {
+      return 0;
+    }
+  }
+
+  byte1 = (hexchartoint(lancDataCharBuf[0]) << 4) + hexchartoint(lancDataCharBuf[1]);
+  byte2 = (hexchartoint(lancDataCharBuf[2]) << 4) + hexchartoint(lancDataCharBuf[3]);
+
+  for (int i = 0; i < 8; i++) { lancCmd[i] = bitRead(byte1, i); }
+  for (int i = 0; i < 8; i++) { lancCmd[i + 8] = bitRead(byte2, i); }
+
+  return 1;
+}
+
+int hexchartoint(char hexchar) {
+  switch (hexchar) {
+    case 'F':
+      return 15;
+      break;
+    case 'f':
+      return 15;
+      break;
+    case 'E':
+      return 14;
+      break;
+    case 'e':
+      return 14;
+      break;
+    case 'D':
+      return 13;
+      break;
+    case 'd':
+      return 13;
+      break;
+    case 'C':
+      return 12;
+      break;
+    case 'c':
+      return 12;
+      break;
+    case 'B':
+      return 11;
+      break;
+    case 'b':
+      return 11;
+      break;
+    case 'A':
+      return 10;
+      break;
+    case 'a':
+      return 10;
+      break;
+    default:
+      return (int)(hexchar - 48);
+      break;
   }
 }
 
