@@ -142,6 +142,7 @@ volatile uint8_t lancCmdPinState = 0;
 // variables tracking the LANC start timing state
 volatile unsigned long lancTime = 0;
 volatile bool lancPinHigh = false;
+volatile bool lancPacketComplete = true;
 
 FspTimer lancTimer;
 
@@ -155,6 +156,7 @@ static uint8_t rxDataLen = 0;
 
 // LANC char buffer
 #define NUM_LANC_DATA_CHARS 5
+#define NUM_LANC_BYTES_TO_WRITE 2
 static char lancDataCharBuf[NUM_LANC_DATA_CHARS];
 static boolean lancCmd[16];
 
@@ -181,6 +183,38 @@ void lancTimerISR(timer_callback_args_t __attribute__((unused)) *args) {
 
   uint8_t pin  = lancActiveCmdPin;
   uint8_t tick = lancBitTick;           //
+  uint8_t b    = lancTxBuf[lancByteIdx];
+
+  // We act only on even ticks (the "set" tick); odd ticks are the hold phase.
+  if ((tick & 0x01) == 0) {
+    uint8_t bitIdx = tick >> 1;     // 0=start, 1-8=data, 9=stop
+
+    if (bitIdx == 0) {
+      // Start bit — let camera master drive the bus
+
+    } else if (bitIdx <= 8) {
+      // Data bits, LSB first
+      uint8_t dataBit = (b >> (bitIdx - 1)) & 0x01;
+      digitalWrite(pin, dataBit ? HIGH : LOW);
+
+    } else {
+      // Stop bit — let camera master drive the bus      
+    }
+  }
+
+  lancBitTick++;
+
+  // Finished all ticks for this byte?
+  if (lancBitTick >= LANC_TICKS_PER_BYTE) {
+    lancBitTick = 0;
+    lancByteIdx++;
+
+    if (lancByteIdx >= NUM_LANC_BYTES_TO_WRITE /*lancTxLen */) {
+      // We only write the first 2 bytes — return to idle
+	  lancPacketComplete = true;
+      lancBusy = false;
+    }
+  }
 }
 
 // Release all pan/tilt pins to HIGH-Z (INPUT, no pull-up)
@@ -314,6 +348,44 @@ bool checkLancReady() {
   }
   
   return false;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LANC TIMER STOP / RESTART
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Stop the LANC timer and leave the CMD pin in idle-HIGH state.
+// Safe to call from loop(); do NOT call from within lancTimerISR.
+void stopLancTimer() {
+  lancTimer.stop();
+  lancTimer.close();
+
+  // Reset ISR state so a restart begins cleanly
+  lancBusy       = false;
+  lancCmdPending = false;
+  lancBitTick    = 0;
+  lancByteIdx    = 0;
+
+  // Drive all CMD pins idle HIGH
+  for (uint8_t i = 0; i < 3; i++) {
+    digitalWrite(lancCmdPin[i], HIGH);
+  }
+}
+
+// Restart the LANC timer after stopLancTimer().
+// Reuses the same FspTimer instance and ISR.
+void restartLancTimer() {
+  float freqHz = 1.0e6f / (float)LANC_HALF_BIT_US;   // ~19231 Hz
+  if (lancTimer.begin(TIMER_MODE_PERIODIC,
+                      AGT_TIMER,
+                      0,          // AGT channel 0
+                      freqHz,
+                      0.0f,
+                      lancTimerISR)) {
+    lancTimer.setup_overflow_irq();
+    lancTimer.open();
+    lancTimer.start();
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -475,6 +547,36 @@ void queueLancCommand(uint8_t b1, uint8_t b2, uint8_t len) {
   lancCmdPending      = true;   // ISR picks this up on next tick
 }
 
+// ─── LANC Timer Init (fixed) ──────────────────────────────────────────────────
+void initLancTimer() {
+  float freqHz = 1.0e6f / (float)LANC_HALF_BIT_US;  // ~19231 Hz
+
+  // AGT channel 0 is reserved by the Arduino core (millis/micros).
+  // Use AGT channel 1 instead.
+  uint8_t timerType = AGT_TIMER;
+  int8_t  channel   = lancTimer.get_available_timer(timerType);
+  if (channel < 0) {
+    Serial.println("ERR: No AGT timer available");
+    return;
+  }
+
+  if (!lancTimer.begin(TIMER_MODE_PERIODIC,
+                       timerType,
+                       channel,
+                       freqHz,
+                       0.0f,
+                       lancTimerISR)) {
+    Serial.println("ERR: lancTimer.begin() failed");
+    return;
+  }
+
+  lancTimer.setup_overflow_irq();
+  lancTimer.open();
+  lancTimer.start();
+  Serial.print("LANC timer OK on AGT ch");
+  Serial.println(channel);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // setup()
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -486,6 +588,9 @@ void setup() {
 // loop()
 // ═══════════════════════════════════════════════════════════════════════════════
 void loop() {
+  if(lancPacketComplete){
+	stopLancTimer();
+  }
   // 1. Service incoming USB-serial frames from host
   parseSerialInput();
 
@@ -508,6 +613,8 @@ void loop() {
     }
     if (checkLancReady()) {
     // 5ms window detected on the active pin!
+      lancPacketComplete = false;
+		  restartLancTimer();
     }
   }
 
@@ -540,18 +647,7 @@ void initHardware() {
     pinMode(lancSigPin[i], INPUT_PULLUP);
   }
 
-  // --- LANC timer: AGT0 fires every LANC_HALF_BIT_US (52 µs) ---
-  // Use AGT periodic timer channel 0
-  if (lancTimer.begin(TIMER_MODE_PERIODIC,
-                      AGT_TIMER,
-                      0,                        // channel 0
-                      1.0e6f / LANC_HALF_BIT_US, // frequency in Hz (~19231 Hz)
-                      0.0f,
-                      lancTimerISR)) {
-    lancTimer.setup_overflow_irq();
-    lancTimer.open();
-    lancTimer.start();
-  }
+  initLancTimer();
 
   // --- Application state ---
   activeCam     = -1;
