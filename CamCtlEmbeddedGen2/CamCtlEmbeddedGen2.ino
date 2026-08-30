@@ -8,6 +8,25 @@
  * - LANC SIG_IN pins are monitored via pin-change / external interrupts.
  * Serial handshake uses '<' '>' framing; host announces with '!'.
  */
+ 
+/* In the standard 8-byte LANC packet frame, an external controller (acting as a 
+slave/remote relative to the camera's master timing) injects command data 
+exclusively into Byte 0 and Byte 1.
+Packet Structure and Injection Slots
+Byte 0: First command slot (e.g., zoom/focus or record start/stop commands).
+Byte 1: Second command slot (extended command or secondary parameters).
+Bytes 2 & 3: Reserved for tuners or extra control/command extensions 
+(usually left as 00 by standard controllers).
+Bytes 4 through 7: Camera-to-controller VCR status bytes, counter data, and 
+device status (driven strictly by the camera master).
+How Injection Works
+The camera (master) generates the clock and pulls the line low to signal the 
+start bit for each of the 8 bytes in a frame.
+The external device (slave/remote) listens for the start bit of Byte 0, waits 
+for the precise bit timing, and pulls the open-collector line low to inject 
+its command bits into Byte 0 and immediately after during Byte 1.
+For the remaining bytes (Bytes 2–7), the external controller stops driving the 
+line and only listens to the status information transmitted by the camera. */
 
 #include "FspTimer.h"   // RA4M1 FSP timer wrapper bundled with UNO R4 core
 #include <WiFiS3.h>
@@ -18,11 +37,12 @@
 #define STX               '<'
 #define ETX               '>'
 
-#define rxAckSTX  "FE"
-#define rxAckCh   "AA"
-#define rxAckETX  "EF"
-#define rxAckCID  '@'
-#define rxAckCMD  '$'
+#define rxAckSTX   "FE"
+#define rxAckCh    "AA"
+#define rxAckETX   "EF"
+#define rxAckCID   '@'
+#define rxAckCMD   '$'
+#define rxAckCmplt '%'
 
 #define cam1Id    '1'
 #define cam2Id    '2'
@@ -61,6 +81,7 @@
 #define CAM3_TILT_DOWN      4
 #define CAM3_TILT_UP       19
 #define NUM_CAMERAS         3
+
 // LANC Wire color pin assignment:
 // Tip -- White
 // Ring -- Red
@@ -76,6 +97,11 @@
 // Slowest: 28 10in
 // Medium: 28 14
 // Fastest: 28 1E
+
+// LANC timing constants at 9600 baud (in microseconds)
+const uint32_t BIT_TIME = 104;
+const uint32_t HALF_BIT_TIME = 52;
+const uint32_t SYNC_GAP_MIN = 5000; // 5ms sync preamble threshold
 
 // ─── Pin lookup tables (index: 0=CAM1, 1=CAM2, 2=CAM3) ───────────────────────
 const uint8_t lancCmdPin[NUM_CAMERAS]  = { CAM1_LANC_CMD_OUT, CAM2_LANC_CMD_OUT, CAM3_LANC_CMD_OUT };
@@ -95,6 +121,10 @@ const uint8_t validCamValues[NUM_CAMERAS] = { cam1Id, cam2Id, cam3Id };
 #define NUM_COMMANDS 6
 const uint8_t validCmdValues[NUM_COMMANDS] = { CMD_PAN_LEFT, CMD_PAN_RIGHT, CMD_TILT_UP, CMD_TILT_DOWN, CMD_PAN_STOP, CMD_LANC }; 
 volatile uint8_t activeLancSigPin = CAM1_LANC_SIG_IN;
+volatile enum { SEARCHING_SYNC, WAITING_START, PROCESSING_BYTE } lanc_state = SEARCHING_SYNC;
+volatile uint32_t last_falling_edge = 0;
+volatile uint8_t byte_counter = 0;
+volatile uint8_t bit_counter = 0;
 
 // ─── LANC timing ──────────────────────────────────────────────────────────────
 // LANC runs at 9600 baud → 1 bit = 104.167 µs.
@@ -134,6 +164,8 @@ volatile uint8_t  lancCmdByte    = 0x00;   // command byte to transmit
 volatile uint8_t  lancCmdByte2   = 0x00;   // second LANC byte (if needed)
 
 // Pending command loaded by main loop
+
+volatile bool    lancCmdReceived = false;   
 volatile bool    lancCmdPending = false;
 volatile uint8_t lancPendingBuf[2];
 volatile uint8_t lancPendingLen = 0;
@@ -160,14 +192,14 @@ static uint8_t rxDataLen = 0;
 static char lancDataCharBuf[NUM_LANC_DATA_CHARS];
 static boolean lancCmd[16];
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── ISRs ─────────────────────────────────────────────────────────────────
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // LANC timer ISR  (fires every LANC_HALF_BIT_US)
 // ═══════════════════════════════════════════════════════════════════════════════
 void lancTimerISR(timer_callback_args_t __attribute__((unused)) *args) {
   if (!lancBusy) {
-    // Check if main loop queued a new command
+    // Check if main loop issued a new command
     if (lancCmdPending) {
       lancTxBuf[0]    = lancPendingBuf[0];
       lancTxBuf[1]    = lancPendingBuf[1];
@@ -211,10 +243,53 @@ void lancTimerISR(timer_callback_args_t __attribute__((unused)) *args) {
 
     if (lancByteIdx >= NUM_LANC_BYTES_TO_WRITE /*lancTxLen */) {
       // We only write the first 2 bytes — return to idle
-	  lancPacketComplete = true;
+			// Frame complete, reset state engine to find the next synchronization preamble
+			lanc_state = SEARCHING_SYNC;
+			last_falling_edge = micros();
+			lancTimer.stop();
+			lancPacketComplete = true;
+			Serial.println(rxAckCmplt);
       lancBusy = false;
     }
+		else {
+			// Prepare to capture the start bit of the next sequential byte
+			lanc_state = WAITING_START;
+		}
+		attachInterrupt(digitalPinToInterrupt(activeLancSigPin), lancTriggerIsr, FALLING);
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LANC trigger ISR  (External Falling Edge Trigger)
+// ═══════════════════════════════════════════════════════════════════════════════
+void lancTriggerIsr() {
+	uint32_t now = micros();
+
+	if (lanc_state == SEARCHING_SYNC) {
+		// Check if the idle period since the last edge matches the >5ms LANC sync gap
+		if ((now - last_falling_edge) >= SYNC_GAP_MIN) {
+			lanc_state = PROCESSING_BYTE;
+			byte_counter = 0;
+			start_bit_timer(BIT_TIME + HALF_BIT_TIME); // Sample middle of Bit 0 (156us)
+		}
+		last_falling_edge = now;
+	}
+	else if (lanc_state == WAITING_START) {
+		// Detected the start bit falling edge of bytes 1 through 7
+		detachInterrupt(digitalPinToInterrupt(activeLancSigPin)); // Block further edge triggers
+		lanc_state = PROCESSING_BYTE;
+		start_bit_timer(BIT_TIME + HALF_BIT_TIME); // Sync timer to middle of Bit 0
+	}
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// Helper to configure and kick off the hardware timer interval
+void start_bit_timer(uint32_t microsecond_delay) {
+	bit_counter = 0;
+	lancTimer.set_period((double)microsecond_delay);
+	lancTimer.open();
+	lancTimer.start();
 }
 
 // Release all pan/tilt pins to HIGH-Z (INPUT, no pull-up)
@@ -239,37 +314,6 @@ void actuatePanTilt(uint8_t camIdx, uint8_t pin) {
   digitalWrite(pin, LOW);
 }
 
-// ─── LANC bit-bang (polling, called when a LANC command is pending) ───────────
-// Sony LANC: idle HIGH, start bit LOW (1.5 ms), 8 data bits LSB-first at 9600 baud
-// Bit period ≈ 104 µs
-#define LANC_BIT_US  104
-
-void sendLancByte(uint8_t cmdPin, uint8_t b) {
-  // Start bit
-  digitalWrite(cmdPin, LOW);
-  delayMicroseconds(LANC_BIT_US);
-  // 8 data bits, LSB first
-  for (uint8_t i = 0; i < 8; i++) {
-    digitalWrite(cmdPin, (b >> i) & 0x01 ? HIGH : LOW);
-    delayMicroseconds(LANC_BIT_US);
-  }
-  // Stop bit
-  digitalWrite(cmdPin, HIGH);
-  delayMicroseconds(LANC_BIT_US);
-}
-
-void dispatchLancCommand() {
-  if (activeCam < 0 || !lancCmdPending) return;
-  uint8_t cp = lancCmdPin[activeCam];
-  pinMode(cp, OUTPUT);
-  digitalWrite(cp, HIGH);   // idle high
-  sendLancByte(cp, lancCmdByte);
-  if (lancCmdByte2 != 0x00) {
-    sendLancByte(cp, lancCmdByte2);
-  }
-  lancCmdPending = false;
-}
-
 // Functions to check membership
 bool isValidCamId(uint8_t target) {
   for (uint8_t i = 0; i < NUM_CAMERAS; i++) {
@@ -287,19 +331,6 @@ bool isValidCmd(uint8_t target) {
     }
   }
   return false; // Checked everything, no match
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// LANC input ISR  (fires every time the active pin transitions)
-// ═══════════════════════════════════════════════════════════════════════════════
-// ISR triggered instantly when the active pin transitions
-void lancStartISR() {
-  if (digitalRead(activeLancSigPin) == HIGH) {
-    lancPinHigh = true;
-    lancTime = micros(); 
-  } else {
-    lancPinHigh = false; 
-  }
 }
 
 // Function to safely swap pins at runtime
@@ -329,7 +360,7 @@ void initLancPin(byte pin) {
   interrupts();
 
   // Attach the shared ISR function to the new pin
-  attachInterrupt(digitalPinToInterrupt(pin), lancStartISR, CHANGE);
+  //attachInterrupt(digitalPinToInterrupt(pin), lancTriggerIsr, FALLING);
 }
 
 // Non-blocking evaluation function
@@ -366,9 +397,9 @@ void stopLancTimer() {
   lancBitTick    = 0;
   lancByteIdx    = 0;
 
-  // Drive all CMD pins idle HIGH
+  // Drive all CMD pins LOW
   for (uint8_t i = 0; i < 3; i++) {
-    digitalWrite(lancCmdPin[i], HIGH);
+    digitalWrite(lancCmdPin[i], LOW);
   }
 }
 
@@ -489,22 +520,27 @@ void processFrame(const char* buf, uint8_t len) {
 
     case CMD_PAN_LEFT:
       actuatePanTilt((uint8_t)camIdx, panLeftPin[camIdx]);
+			attachInterrupt(digitalPinToInterrupt(activeCam), lancTriggerIsr, FALLING);
       break;
 
     case CMD_PAN_RIGHT:
       actuatePanTilt((uint8_t)camIdx, panRightPin[camIdx]);
+			attachInterrupt(digitalPinToInterrupt(activeCam), lancTriggerIsr, FALLING);
       break;
 
     case CMD_TILT_UP:
       actuatePanTilt((uint8_t)camIdx, tiltUpPin[camIdx]);
+			attachInterrupt(digitalPinToInterrupt(activeCam), lancTriggerIsr, FALLING);
       break;
 
     case CMD_TILT_DOWN:
       actuatePanTilt((uint8_t)camIdx, tiltDownPin[camIdx]);
+			attachInterrupt(digitalPinToInterrupt(activeCam), lancTriggerIsr, FALLING);
       break;
 
     case CMD_PAN_STOP:
       releasePanTilt((uint8_t)camIdx);
+			attachInterrupt(digitalPinToInterrupt(activeCam), lancTriggerIsr, FALLING);
       break;
 
     case CMD_LANC:
@@ -518,14 +554,19 @@ void processFrame(const char* buf, uint8_t len) {
           if (buf[hi] != ' ') hexStr[hIdx++] = buf[hi];
           hi++;
         }
-        if (hIdx < 4) { Serial.println("ERR:LANC_DATA"); break; }
+        if (hIdx < 4) { 
+					Serial.println("ERR:LANC_DATA");
+					break; 
+				}
 
         char temp1[3] = { hexStr[0], hexStr[1], '\0' };
         uint8_t b1 = (uint8_t)strtol(temp1, NULL, 16);
         char temp2[3] = {hexStr[2], hexStr[3], '\0'};
         uint8_t b2 = (uint8_t)strtol(temp2, NULL, 16);
 
+        lancCmdReceived = true;
         queueLancCommand(b1, b2, 2);
+				attachInterrupt(digitalPinToInterrupt(activeCam), lancTriggerIsr, FALLING);
       }
       break;
 
@@ -551,9 +592,7 @@ void queueLancCommand(uint8_t b1, uint8_t b2, uint8_t len) {
 void initLancTimer() {
   float freqHz = 1.0e6f / (float)LANC_HALF_BIT_US;  // ~19231 Hz
 
-  // AGT channel 0 is reserved by the Arduino core (millis/micros).
-  // Use AGT channel 1 instead.
-  uint8_t timerType = AGT_TIMER;
+  uint8_t timerType = GPT_TIMER;
   int8_t  channel   = lancTimer.get_available_timer(timerType);
   if (channel < 0) {
     Serial.println("ERR: No AGT timer available");
@@ -573,8 +612,9 @@ void initLancTimer() {
   lancTimer.setup_overflow_irq();
   lancTimer.open();
   lancTimer.start();
-  Serial.print("LANC timer OK on AGT ch");
-  Serial.println(channel);
+  //Serial.print("LANC timer OK on AGT ch");
+  //Serial.println(channel);
+  lancTimer.stop();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -588,35 +628,27 @@ void setup() {
 // loop()
 // ═══════════════════════════════════════════════════════════════════════════════
 void loop() {
-  if(lancPacketComplete){
-	stopLancTimer();
-  }
   // 1. Service incoming USB-serial frames from host
   parseSerialInput();
 
-  // 2. If host disconnects (DTR dropped), reset state and wait for reconnect
-  if (hostConnected && !Serial) {
-    hostConnected = false;
-    activeCam     = -1;
-    releaseAllPanTilt();
-    Serial.println("DISCONNECTED");
-    // Spin until host reconnects and sends '!'
-    while (true) {
-      if (Serial && Serial.available()) {
-        char c = (char)Serial.read();
-        if (c == HostListeningCode) {
-          hostConnected = true;
-          Serial.println("Arduino LANC to USB-serial interface v1.0");
-          break;
-        }
-      }
-    }
-    if (checkLancReady()) {
-    // 5ms window detected on the active pin!
-      lancPacketComplete = false;
-		  restartLancTimer();
-    }
-  }
+  // // 2. If host disconnects (DTR dropped), reset state and wait for reconnect
+  // if (hostConnected && !Serial) {
+  //   hostConnected = false;
+  //   activeCam     = -1;
+  //   releaseAllPanTilt();
+  //   Serial.println("DISCONNECTED");
+  //   // Spin until host reconnects and sends '!'
+  //   while (true) {
+  //     if (Serial && Serial.available()) {
+  //       char c = (char)Serial.read();
+  //       if (c == HostListeningCode) {
+  //         hostConnected = true;
+  //         Serial.println("Arduino LANC to USB-serial interface v1.0");
+  //         break;
+  //       }
+  //     }
+  //   }
+  // }
 
   // 3. No other blocking work here — LANC TX is handled entirely by lancTimerISR,
   //    and pan/tilt pins are set directly inside processFrame().
@@ -677,68 +709,3 @@ void flushSerialBuffer() {
     Serial.read();
   }
 }
-
-boolean hexchartobitarray() {
-  // This function converts the hex char LANC command and fills the lancCmd array with the bits in LSB-first order
-
-  int byte1, byte2;
-
-  for (int i = 0; i < 4; i++) {
-    if (!(isHexadecimalDigit(lancDataCharBuf[i]))) {
-      return 0;
-    }
-  }
-
-  byte1 = (hexchartoint(lancDataCharBuf[0]) << 4) + hexchartoint(lancDataCharBuf[1]);
-  byte2 = (hexchartoint(lancDataCharBuf[2]) << 4) + hexchartoint(lancDataCharBuf[3]);
-
-  for (int i = 0; i < 8; i++) { lancCmd[i] = bitRead(byte1, i); }
-  for (int i = 0; i < 8; i++) { lancCmd[i + 8] = bitRead(byte2, i); }
-
-  return 1;
-}
-
-int hexchartoint(char hexchar) {
-  switch (hexchar) {
-    case 'F':
-      return 15;
-      break;
-    case 'f':
-      return 15;
-      break;
-    case 'E':
-      return 14;
-      break;
-    case 'e':
-      return 14;
-      break;
-    case 'D':
-      return 13;
-      break;
-    case 'd':
-      return 13;
-      break;
-    case 'C':
-      return 12;
-      break;
-    case 'c':
-      return 12;
-      break;
-    case 'B':
-      return 11;
-      break;
-    case 'b':
-      return 11;
-      break;
-    case 'A':
-      return 10;
-      break;
-    case 'a':
-      return 10;
-      break;
-    default:
-      return (int)(hexchar - 48);
-      break;
-  }
-}
-
