@@ -120,7 +120,7 @@ const uint8_t allPanTiltPins[] = {
 const uint8_t validCamValues[NUM_CAMERAS] = { cam1Id, cam2Id, cam3Id };
 #define NUM_COMMANDS 6
 const uint8_t validCmdValues[NUM_COMMANDS] = { CMD_PAN_LEFT, CMD_PAN_RIGHT, CMD_TILT_UP, CMD_TILT_DOWN, CMD_PAN_STOP, CMD_LANC }; 
-volatile uint8_t activeLancSigPin = CAM1_LANC_SIG_IN;
+volatile uint8_t lancActiveSigPin = CAM1_LANC_SIG_IN;
 volatile enum { SEARCHING_SYNC, WAITING_START, PROCESSING_BYTE } lanc_state = SEARCHING_SYNC;
 volatile uint32_t last_falling_edge = 0;
 volatile uint8_t byte_counter = 0;
@@ -145,7 +145,7 @@ volatile uint8_t lancTxBuf[2]   = { 0x00, 0x00 };  // up to 2 bytes per frame
 volatile uint8_t lancTxLen      = 0;                // 1 or 2 bytes
 volatile uint8_t lancByteIdx    = 0;                // which byte we are on
 volatile uint8_t lancBitTick    = 0;                // half-bit tick within current byte
-volatile uint8_t lancActiveCmdPin = 0xFF;           // pin currently being driven
+volatile uint8_t lancActiveCmdPin = 0x05;           // pin currently being driven
 
 // ─── LANC frame state (interrupt-driven, one camera active) ──────────────────
 
@@ -174,7 +174,9 @@ volatile uint8_t lancCmdPinState = 0;
 // variables tracking the LANC start timing state
 volatile unsigned long lancTime = 0;
 volatile bool lancPinHigh = false;
-volatile bool lancPacketComplete = true;
+volatile bool lancPacketComplete = false;
+volatile bool actionComplete = false;
+
 
 FspTimer lancTimer;
 
@@ -216,7 +218,7 @@ void lancTimerISR(timer_callback_args_t __attribute__((unused)) *args) {
   uint8_t pin  = lancActiveCmdPin;
   uint8_t tick = lancBitTick;           //
   uint8_t b    = lancTxBuf[lancByteIdx];
-
+  
   // We act only on even ticks (the "set" tick); odd ticks are the hold phase.
   if ((tick & 0x01) == 0) {
     uint8_t bitIdx = tick >> 1;     // 0=start, 1-8=data, 9=stop
@@ -248,14 +250,13 @@ void lancTimerISR(timer_callback_args_t __attribute__((unused)) *args) {
 			last_falling_edge = micros();
 			lancTimer.stop();
 			lancPacketComplete = true;
-			Serial.println(rxAckCmplt);
       lancBusy = false;
     }
 		else {
 			// Prepare to capture the start bit of the next sequential byte
 			lanc_state = WAITING_START;
 		}
-		attachInterrupt(digitalPinToInterrupt(activeLancSigPin), lancTriggerIsr, FALLING);
+		detachInterrupt(digitalPinToInterrupt(lancActiveSigPin));
   }
 }
 
@@ -276,7 +277,7 @@ void lancTriggerIsr() {
 	}
 	else if (lanc_state == WAITING_START) {
 		// Detected the start bit falling edge of bytes 1 through 7
-		detachInterrupt(digitalPinToInterrupt(activeLancSigPin)); // Block further edge triggers
+		detachInterrupt(digitalPinToInterrupt(lancActiveSigPin)); // Block further edge triggers
 		lanc_state = PROCESSING_BYTE;
 		start_bit_timer(BIT_TIME + HALF_BIT_TIME); // Sync timer to middle of Bit 0
 	}
@@ -334,24 +335,26 @@ bool isValidCmd(uint8_t target) {
 }
 
 // Function to safely swap pins at runtime
-void changeLancPin(byte newPin) {
+void changeLancPin(byte newSigPin, byte newCmdPin) {
   // 1. Remove interrupt from the old pin
-  detachInterrupt(digitalPinToInterrupt(activeLancSigPin));
+  detachInterrupt(digitalPinToInterrupt(lancActiveSigPin));
   
-  // 2. Set the new pin variable
-  activeLancSigPin = newPin;
+  // 2. Set the new pin variables
+  lancActiveSigPin = newSigPin;
   
+  lancActiveCmdPin = newCmdPin;
   // 3. Initialize and attach the new pin
-  initLancPin(activeLancSigPin);
+  initLancPins(lancActiveSigPin, lancActiveCmdPin);
 }
 
 // Helper to configure a pin and set baseline states
-void initLancPin(byte pin) {
-  pinMode(pin, INPUT);
+void initLancPins(byte sigPin, byte cmdPin) {
+  pinMode(sigPin, INPUT);
+  pinMode(cmdPin, OUTPUT);
   
   // Clear states before attaching to avoid false triggers
   noInterrupts();
-  if (digitalRead(pin) == HIGH) {
+  if (digitalRead(sigPin) == HIGH) {
     lancPinHigh = true;
     lancTime = micros();
   } else {
@@ -361,24 +364,6 @@ void initLancPin(byte pin) {
 
   // Attach the shared ISR function to the new pin
   //attachInterrupt(digitalPinToInterrupt(pin), lancTriggerIsr, FALLING);
-}
-
-// Non-blocking evaluation function
-bool checkLancReady() {
-  noInterrupts();
-  bool isHigh = lancPinHigh;
-  unsigned long startTime = lancTime;
-  interrupts();
-
-  if (!isHigh) {
-    return false; 
-  }
-  
-  if (micros() - startTime >= 5000) {
-    return true; 
-  }
-  
-  return false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -511,7 +496,7 @@ void processFrame(const char* buf, uint8_t len) {
   if (camIdx != activeCam) {
     if (activeCam >= 0) releasePanTilt((uint8_t)activeCam);
     activeCam = camIdx;
-    changeLancPin(lancSigPin[activeCam]);
+    changeLancPin(lancSigPin[activeCam], lancCmdPin[activeCam]);
   }
 
   // --- Byte 1: command character ---
@@ -521,27 +506,27 @@ void processFrame(const char* buf, uint8_t len) {
 
     case CMD_PAN_LEFT:
       actuatePanTilt((uint8_t)camIdx, panLeftPin[camIdx]);
-			detachInterrupt(digitalPinToInterrupt(activeLancSigPin));
+			detachInterrupt(digitalPinToInterrupt(lancActiveSigPin));
       break;
 
     case CMD_PAN_RIGHT:
       actuatePanTilt((uint8_t)camIdx, panRightPin[camIdx]);
-			detachInterrupt(digitalPinToInterrupt(activeLancSigPin));
+			detachInterrupt(digitalPinToInterrupt(lancActiveSigPin));
       break;
 
     case CMD_TILT_UP:
       actuatePanTilt((uint8_t)camIdx, tiltUpPin[camIdx]);
-			detachInterrupt(digitalPinToInterrupt(activeLancSigPin));
+			detachInterrupt(digitalPinToInterrupt(lancActiveSigPin));
       break;
 
     case CMD_TILT_DOWN:
       actuatePanTilt((uint8_t)camIdx, tiltDownPin[camIdx]);
-			detachInterrupt(digitalPinToInterrupt(activeLancSigPin));
+			detachInterrupt(digitalPinToInterrupt(lancActiveSigPin));
       break;
 
     case CMD_PAN_STOP:
       releasePanTilt((uint8_t)camIdx);
-			detachInterrupt(digitalPinToInterrupt(activeLancSigPin));
+			detachInterrupt(digitalPinToInterrupt(lancActiveSigPin));
       break;
 
     case CMD_LANC:
@@ -567,7 +552,7 @@ void processFrame(const char* buf, uint8_t len) {
 
         lancCmdReceived = true;
         queueLancCommand(b1, b2, 2);
-				attachInterrupt(digitalPinToInterrupt(activeLancSigPin), lancTriggerIsr, FALLING);
+				attachInterrupt(digitalPinToInterrupt(lancActiveSigPin), lancTriggerIsr, FALLING);
       }
       break;
 
@@ -630,8 +615,14 @@ void setup() {
 // ═══════════════════════════════════════════════════════════════════════════════
 void loop() {
   // 1. Service incoming USB-serial frames from host
-  parseSerialInput();
-
+  if(lancPacketComplete)
+	{		
+		Serial.println(rxAckCmplt);
+		lancPacketComplete = false;
+	}
+	else {
+		parseSerialInput();
+  }
   // // 2. If host disconnects (DTR dropped), reset state and wait for reconnect
   // if (hostConnected && !Serial) {
   //   hostConnected = false;
@@ -688,7 +679,7 @@ void initHardware() {
   inFrame       = false;
   rxDataLen     = 0;
 
-  initLancPin(activeLancSigPin);
+  initLancPins(lancActiveSigPin, lancActiveCmdPin);
 
   // --- Host handshake ---
   // Wait for HostListeningCode '!'
