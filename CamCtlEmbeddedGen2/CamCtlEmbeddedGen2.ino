@@ -136,8 +136,8 @@ volatile uint8_t bit_counter = 0;
 #define LANC_TICKS_PER_BYTE (LANC_BITS_PER_BYTE * 2u)   // 20 half-bit ticks
 
 // ─── Application state ────────────────────────────────────────────────────────
-int8_t  activeCam      = -1;   // 0-based; -1 = none selected
-bool    hostConnected  = false;
+volatile int8_t  activeCam      = -1;   // 0-based; -1 = none selected
+static bool    hostConnected  = false;
 
 // ─── LANC ISR state ───────────────────────────────────────────────────────────
 volatile bool    lancBusy       = false;
@@ -494,7 +494,8 @@ void processFrame(const char* buf, uint8_t len) {
 
   // --- Byte 0: camera ID ---
   char camChar = buf[0];
-  int8_t camIdx = -1;
+  volatile int8_t camIdx = 0;
+  
   if      (camChar == cam1Id) camIdx = 0;
   else if (camChar == cam2Id) camIdx = 1;
   else if (camChar == cam3Id) camIdx = 2;
@@ -510,7 +511,7 @@ void processFrame(const char* buf, uint8_t len) {
   if (camIdx != activeCam) {
     if (activeCam >= 0) releasePanTilt((uint8_t)activeCam);
     activeCam = camIdx;
-    changeLancPin(activeCam);
+    changeLancPin(lancSigPin[activeCam]);
   }
 
   // --- Byte 1: command character ---
@@ -520,27 +521,27 @@ void processFrame(const char* buf, uint8_t len) {
 
     case CMD_PAN_LEFT:
       actuatePanTilt((uint8_t)camIdx, panLeftPin[camIdx]);
-			attachInterrupt(digitalPinToInterrupt(activeCam), lancTriggerIsr, FALLING);
+			detachInterrupt(digitalPinToInterrupt(activeLancSigPin));
       break;
 
     case CMD_PAN_RIGHT:
       actuatePanTilt((uint8_t)camIdx, panRightPin[camIdx]);
-			attachInterrupt(digitalPinToInterrupt(activeCam), lancTriggerIsr, FALLING);
+			detachInterrupt(digitalPinToInterrupt(activeLancSigPin));
       break;
 
     case CMD_TILT_UP:
       actuatePanTilt((uint8_t)camIdx, tiltUpPin[camIdx]);
-			attachInterrupt(digitalPinToInterrupt(activeCam), lancTriggerIsr, FALLING);
+			detachInterrupt(digitalPinToInterrupt(activeLancSigPin));
       break;
 
     case CMD_TILT_DOWN:
       actuatePanTilt((uint8_t)camIdx, tiltDownPin[camIdx]);
-			attachInterrupt(digitalPinToInterrupt(activeCam), lancTriggerIsr, FALLING);
+			detachInterrupt(digitalPinToInterrupt(activeLancSigPin));
       break;
 
     case CMD_PAN_STOP:
       releasePanTilt((uint8_t)camIdx);
-			attachInterrupt(digitalPinToInterrupt(activeCam), lancTriggerIsr, FALLING);
+			detachInterrupt(digitalPinToInterrupt(activeLancSigPin));
       break;
 
     case CMD_LANC:
@@ -566,7 +567,7 @@ void processFrame(const char* buf, uint8_t len) {
 
         lancCmdReceived = true;
         queueLancCommand(b1, b2, 2);
-				attachInterrupt(digitalPinToInterrupt(activeCam), lancTriggerIsr, FALLING);
+				attachInterrupt(digitalPinToInterrupt(activeLancSigPin), lancTriggerIsr, FALLING);
       }
       break;
 
