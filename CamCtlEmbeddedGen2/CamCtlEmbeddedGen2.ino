@@ -29,6 +29,7 @@ For the remaining bytes (Bytes 2–7), the external controller stops driving the
 line and only listens to the status information transmitted by the camera. */
 
 #include "FspTimer.h"   // RA4M1 FSP timer wrapper bundled with UNO R4 core
+#include "r_gpt.h"      // Renesas GPT header
 #include <WiFiS3.h>
 #include <WiFiUdp.h>
 
@@ -200,6 +201,13 @@ static boolean lancCmd[16];
 // LANC timer ISR  (fires every LANC_HALF_BIT_US)
 // ═══════════════════════════════════════════════════════════════════════════════
 void lancTimerISR(timer_callback_args_t __attribute__((unused)) *args) {
+	
+	if(!lancCmdReceived) {
+		lancTimer.stop();
+		lancBusy = false;
+		return;
+	}
+	
   if (!lancBusy) {
     // Check if main loop issued a new command
     if (lancCmdPending) {
@@ -207,7 +215,7 @@ void lancTimerISR(timer_callback_args_t __attribute__((unused)) *args) {
       lancTxBuf[1]    = lancPendingBuf[1];
       lancTxLen       = lancPendingLen;
       lancByteIdx     = 0;
-      lancBitTick     = 0;
+      lancBitTick     = 1; // Keep aligned with trigger initialization
       lancCmdPending  = false;
       lancBusy        = true;
       // pin is already set OUTPUT + LOW (idle) in queueLancCommand()
@@ -216,34 +224,28 @@ void lancTimerISR(timer_callback_args_t __attribute__((unused)) *args) {
   }
 
   uint8_t pin  = lancActiveCmdPin;
-  uint8_t tick = lancBitTick;           //
-  uint8_t b    = lancTxBuf[lancByteIdx];
+  uint8_t tick = lancBitTick;           
   
-  // We act only on even ticks (the "set" tick); odd ticks are the hold phase.
+  // CHANGED: We now process on ODD ticks to shift the timeline forward
   if ((tick & 0x01) == 0) {
-    uint8_t bitIdx = tick >> 1;     // 0=start, 1-8=data, 9=stop
+    uint8_t bitIdx = tick >> 1;     // 1=start, 2-9=data, 9=stop
 
-    if (bitIdx == 0) {
-      // Start bit — let camera master drive the bus
-
-    } else if (bitIdx <= 8) {
+    if (bitIdx >= 2 && bitIdx <= 8) {
+      uint8_t b    = lancTxBuf[lancByteIdx];
       // Data bits, LSB first
       uint8_t dataBit = (b >> (bitIdx - 1)) & 0x01;
       digitalWrite(pin, dataBit ? HIGH : LOW);
-
-    } else {
-      // Stop bit — let camera master drive the bus      
-    }
+		}
   }
 
   lancBitTick++;
 
+  // An entire 10-bit LANC byte initialized at tick 2 terminates precisely at tick 20
   // Finished all ticks for this byte?
-  if (lancBitTick >= LANC_TICKS_PER_BYTE) {
-    lancBitTick = 0;
+  if (lancBitTick >= 19) {
     lancByteIdx++;
 
-    if (lancByteIdx >= NUM_LANC_BYTES_TO_WRITE /*lancTxLen */) {
+    if (lancByteIdx >= NUM_LANC_BYTES_TO_WRITE) {
       // We only write the first 2 bytes — return to idle
 			// Frame complete, reset state engine to find the next synchronization preamble
 			lanc_state = SEARCHING_SYNC;
@@ -255,6 +257,7 @@ void lancTimerISR(timer_callback_args_t __attribute__((unused)) *args) {
 		else {
 			// Prepare to capture the start bit of the next sequential byte
 			lanc_state = WAITING_START;
+			lancTimer.stop();
 		}
 		detachInterrupt(digitalPinToInterrupt(lancActiveSigPin));
   }
@@ -264,6 +267,12 @@ void lancTimerISR(timer_callback_args_t __attribute__((unused)) *args) {
 // LANC trigger ISR  (External Falling Edge Trigger)
 // ═══════════════════════════════════════════════════════════════════════════════
 void lancTriggerIsr() {
+	
+	if(!lancCmdReceived) {
+		return;
+	}
+	
+  uint8_t pin  = lancActiveCmdPin;
 	uint32_t now = micros();
 
 	if (lanc_state == SEARCHING_SYNC) {
@@ -271,7 +280,21 @@ void lancTriggerIsr() {
 		if ((now - last_falling_edge) >= SYNC_GAP_MIN) {
 			lanc_state = PROCESSING_BYTE;
 			byte_counter = 0;
-			start_bit_timer(BIT_TIME + HALF_BIT_TIME); // Sample middle of Bit 0 (156us)
+			
+			// Start at tick 1 (instead of 2) to advance the timeline by 52us
+			lancBitTick = 3;
+			
+      // Fine-tune the hardware sync latency directly with a tight delay
+      delayMicroseconds(10); 	
+
+      // INJECT DATA BIT 0 IMMEDIATELY (Saves 104us + fixes 28us lag)
+      uint8_t b = lancTxBuf[0];
+      uint8_t dataBit = (b >> (7)) & 0x01;
+      digitalWrite(pin, dataBit ? HIGH : LOW);
+			
+			// Kick off the timer (this incurs the fixed hardware sync overhead)
+			lancTimer.reset();
+			lancTimer.start();
 		}
 		last_falling_edge = now;
 	}
@@ -279,7 +302,17 @@ void lancTriggerIsr() {
 		// Detected the start bit falling edge of bytes 1 through 7
 		detachInterrupt(digitalPinToInterrupt(lancActiveSigPin)); // Block further edge triggers
 		lanc_state = PROCESSING_BYTE;
-		start_bit_timer(BIT_TIME + HALF_BIT_TIME); // Sync timer to middle of Bit 0
+		lancBitTick = 3;
+		
+		delayMicroseconds(10);
+
+    // Inject Data Bit 0 immediately for the sequential byte
+		uint8_t b = lancTxBuf[lancByteIdx];
+    uint8_t dataBit = (b >> (7)) & 0x01;
+    digitalWrite(pin, dataBit ? HIGH : LOW);
+		
+		lancTimer.reset();
+		lancTimer.start();		
 	}
 }
 
@@ -288,8 +321,11 @@ void lancTriggerIsr() {
 // Helper to configure and kick off the hardware timer interval
 void start_bit_timer(uint32_t microsecond_delay) {
 	bit_counter = 0;
-	lancTimer.set_period((double)microsecond_delay);
-	lancTimer.open();
+	lancTimer.stop();
+	float frequency_hz = 1000000.0f / (float)microsecond_delay;
+	lancTimer.set_period(frequency_hz);
+	//lancTimer.open();
+	lancTimer.reset();
 	lancTimer.start();
 }
 
@@ -364,44 +400,6 @@ void initLancPins(byte sigPin, byte cmdPin) {
 
   // Attach the shared ISR function to the new pin
   //attachInterrupt(digitalPinToInterrupt(pin), lancTriggerIsr, FALLING);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// LANC TIMER STOP / RESTART
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// Stop the LANC timer and leave the CMD pin in idle-HIGH state.
-// Safe to call from loop(); do NOT call from within lancTimerISR.
-void stopLancTimer() {
-  lancTimer.stop();
-  lancTimer.close();
-
-  // Reset ISR state so a restart begins cleanly
-  lancBusy       = false;
-  lancCmdPending = false;
-  lancBitTick    = 0;
-  lancByteIdx    = 0;
-
-  // Drive all CMD pins LOW
-  for (uint8_t i = 0; i < 3; i++) {
-    digitalWrite(lancCmdPin[i], LOW);
-  }
-}
-
-// Restart the LANC timer after stopLancTimer().
-// Reuses the same FspTimer instance and ISR.
-void restartLancTimer() {
-  float freqHz = 1.0e6f / (float)LANC_HALF_BIT_US;   // ~19231 Hz
-  if (lancTimer.begin(TIMER_MODE_PERIODIC,
-                      AGT_TIMER,
-                      0,          // AGT channel 0
-                      freqHz,
-                      0.0f,
-                      lancTimerISR)) {
-    lancTimer.setup_overflow_irq();
-    lancTimer.open();
-    lancTimer.start();
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -597,9 +595,6 @@ void initLancTimer() {
 
   lancTimer.setup_overflow_irq();
   lancTimer.open();
-  lancTimer.start();
-  //Serial.print("LANC timer OK on AGT ch");
-  //Serial.println(channel);
   lancTimer.stop();
 }
 
@@ -623,27 +618,6 @@ void loop() {
 	else {
 		parseSerialInput();
   }
-  // // 2. If host disconnects (DTR dropped), reset state and wait for reconnect
-  // if (hostConnected && !Serial) {
-  //   hostConnected = false;
-  //   activeCam     = -1;
-  //   releaseAllPanTilt();
-  //   Serial.println("DISCONNECTED");
-  //   // Spin until host reconnects and sends '!'
-  //   while (true) {
-  //     if (Serial && Serial.available()) {
-  //       char c = (char)Serial.read();
-  //       if (c == HostListeningCode) {
-  //         hostConnected = true;
-  //         Serial.println("Arduino LANC to USB-serial interface v1.0");
-  //         break;
-  //       }
-  //     }
-  //   }
-  // }
-
-  // 3. No other blocking work here — LANC TX is handled entirely by lancTimerISR,
-  //    and pan/tilt pins are set directly inside processFrame().
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
