@@ -1969,3 +1969,17 @@ Adds multi‑frame repeat hooks
 Adds status‑read scaffolding
 
 And removes all GPT/AGT experiments that were causing compile errors.
+
+
+Message Copilot
+
+Smart
+
+
+
+
+
+
+Start a group
+
+Invite friends to chat together with Copilot

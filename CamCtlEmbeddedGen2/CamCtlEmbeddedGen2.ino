@@ -119,10 +119,9 @@ struct LancChannel {
     uint8_t txBuf[2];                // bytes 0–1 to inject
     uint8_t rxBuf[8];                // bytes 0–7 readback
 
-    volatile uint8_t  byteIdx;
-    volatile uint8_t  bitTick;
     volatile uint8_t  state;
-		
+
+    // Status read scaffolding (bytes 2–7)
     volatile uint8_t statusByteIdx;  // 2..7
     volatile uint8_t statusBitIdx;   // 0..9 (start+8+stop)
 };
@@ -178,32 +177,23 @@ enum FrameState {
 
 // ─── Application state ────────────────────────────────────────────────────────
 volatile int8_t  activeCam      = -1;   // 0-based; -1 = none selected
-
-// ─── LANC ISR state ───────────────────────────────────────────────────────────
-volatile bool    lancBusy       = false;
-volatile uint8_t lancTxBuf[2]   = { 0x00, 0x00 };  // up to 2 bytes per frame
-volatile uint8_t lancTxLen      = 0;                // 1 or 2 bytes
-volatile uint8_t lancByteIdx    = 0;                // which byte we are on
-volatile uint8_t lancBitTick    = 0;                // half-bit tick within current byte
-volatile uint8_t lancActiveCmdPin = 0x05;           // pin currently being driven
-
-
+volatile bool lancPacketComplete = false;
 FrameState currentState = IDLE;
 static bool validCamId = false;
 static bool validCmd = false;
 
-volatile uint8_t  lancCmdByte    = 0x00;   // command byte to transmit
-volatile uint8_t  lancCmdByte2   = 0x00;   // second LANC byte (if needed)
+// ─── Bit-Bang control ───────────────────────────────────────────────────────────
+volatile bool lancBitBangActive = false;
+volatile uint32_t lancStartTime = 0;
+
 
 // Pending command loaded by main loop
 
 volatile bool    lancCmdReceived = false;   
 volatile bool    lancCmdPending = false;
-volatile uint8_t lancPendingBuf[2];
-volatile uint8_t lancCmdPinState = 0;
+
 
 // variables tracking the LANC start timing state
-volatile bool lancPacketComplete = false;
 volatile bool actionComplete = false;
 
 // repeat counters for multi-frame operation
@@ -227,14 +217,10 @@ void selectLancChannel(int idx) {
     for (int i = 0; i < 3; i++) {
         lanc[i].active = (i == idx);
         lanc[i].state  = SEARCHING_SYNC;
-        lanc[i].byteIdx = 0;
-        lanc[i].bitTick = 0;
         lanc[i].statusByteIdx = 2;
         lanc[i].statusBitIdx  = 0;
         digitalWrite(lanc[i].txPin, LOW);  // idle
     }
-
-    lancTimer.stop();
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -246,6 +232,7 @@ void queueLancCommand(uint8_t b0, uint8_t b1, uint8_t repeatFrames = 1) {
     lanc[activeCam].txBuf[0] = b0;
     lanc[activeCam].txBuf[1] = b1;
     lanc[activeCam].cmdPending = true;
+		
     lancFrameRepeatCount     = repeatFrames;
     lancFrameRepeatRemaining = repeatFrames;
 }
@@ -310,27 +297,16 @@ void lancTriggerISR(int ch) {
 		case SEARCHING_SYNC:
 			if (gap >= SYNC_GAP_MIN_US && C.cmdPending) {
 					C.state   = PROCESSING_BYTE;
-					C.byteIdx = 0;
-					C.bitTick = 0;
-
+          // Record start time for bit-bang engine
+          lancStartTime = micros();
+          lancBitBangActive = true;
 					// Inject start bit immediately
 					digitalWrite(C.txPin, LOW);
-
-					lancTimer.reset();
-					lancTimer.start();
 			}
 			break;
 
 		case WAITING_START:
-				// Start bit detected for next byte
-				C.state   = PROCESSING_BYTE;
-				C.bitTick = 0;
-
-				// Inject start bit immediately
-				digitalWrite(C.txPin, LOW);
-
-				lancTimer.reset();
-				lancTimer.start();
+				// For future multi-byte sequences
 				break;
 
 		default:
@@ -348,98 +324,105 @@ void lancTriggerISR2() { lancTriggerISR(2); }
 // ─────────────────────────────────────────────────────────────
 void lancTimerISR(timer_callback_args_t *) {
 
-    if (activeCam < 0) {
-        lancTimer.stop();
-        return;
-    }
+	if (activeCam < 0) {
+			lancTimer.stop();
+			return;
+	}
 
-    LancChannel &C = lanc[activeCam];
+	LancChannel &C = lanc[activeCam];
 
-    // Injection phase: bytes 0–1
-    if (C.state == PROCESSING_BYTE) {
 
-        if (!C.cmdPending) {
-            lancTimer.stop();
-            return;
-        }
+	// Status read scaffolding (bytes 2–7) — not active yet, but ready
+	if (C.state == READING_STATUS) {
+		// Example skeleton: sample at mid-bit and fill rxBuf[2..7]
+		static uint8_t tick = 0;
+		tick++;
 
-        uint8_t tick = C.bitTick;
-        uint8_t pin  = C.txPin;
+		if ((tick & 1) == 1) {
+			uint8_t bitIdx = C.statusBitIdx;  // 0=start, 1..8=data, 9=stop
 
-        // Every 2 ticks = 1 bit
-        if ((tick & 1) == 1) {
-            uint8_t bitIdx = tick >> 1;  // 0=start, 1..8=data, 9=stop
+			if (bitIdx >= 1 && bitIdx <= 8) {
+					uint8_t bit = digitalRead(C.rxPin) ? 1 : 0;
+					C.rxBuf[C.statusByteIdx] |= (bit << (bitIdx - 1));
+			}
 
-            if (bitIdx == 0) {
-                digitalWrite(pin, LOW);   // start bit
-            }
-            else if (bitIdx >= 1 && bitIdx <= 8) {
-                uint8_t b = C.txBuf[C.byteIdx];
-                uint8_t dataBit = (b >> (bitIdx - 1)) & 1;
-                digitalWrite(pin, dataBit ? HIGH : LOW);
-            }
-            else if (bitIdx == 9) {
-                digitalWrite(pin, HIGH);  // stop bit
-            }
-        }
+			C.statusBitIdx++;
 
-        C.bitTick++;
+			if (C.statusBitIdx >= 10) {
+				// Finished one status byte
+				C.statusBitIdx = 0;
+				C.statusByteIdx++;
 
-        // Finished 10 bits?
-        if (C.bitTick >= 20) {
-            C.byteIdx++;
-            C.bitTick = 0;
-
-            if (C.byteIdx >= 2) {
-                // Done injecting bytes 0–1
-                lancPacketComplete = true;
-                C.cmdPending = false;
-                C.state      = SEARCHING_SYNC;
-                lancTimer.stop();
-            }
-            else {
-                // Prepare for next byte
-                C.state = WAITING_START;
-                lancTimer.stop();
-            }
-        }
-    }
-
-    // Status read scaffolding (bytes 2–7) — not active yet, but ready
-    else if (C.state == READING_STATUS) {
-        // Example skeleton: sample at mid-bit and fill rxBuf[2..7]
-        static uint8_t tick = 0;
-        tick++;
-
-        if ((tick & 1) == 1) {
-            uint8_t bitIdx = C.statusBitIdx;  // 0=start, 1..8=data, 9=stop
-
-            if (bitIdx >= 1 && bitIdx <= 8) {
-                uint8_t bit = digitalRead(C.rxPin) ? 1 : 0;
-                C.rxBuf[C.statusByteIdx] |= (bit << (bitIdx - 1));
-            }
-
-            C.statusBitIdx++;
-
-            if (C.statusBitIdx >= 10) {
-                // Finished one status byte
-                C.statusBitIdx = 0;
-                C.statusByteIdx++;
-
-                if (C.statusByteIdx > 7) {
-                    // Done bytes 2..7
-                    C.state = SEARCHING_SYNC;
-                    lancTimer.stop();
-                    tick = 0;
-                }
-            }
-        }
-    }
+				if (C.statusByteIdx > 7) {
+						// Done bytes 2..7
+						C.state = SEARCHING_SYNC;
+						lancTimer.stop();
+						tick = 0;
+				}
+			}
+		}
+	}
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────
+// Bit-bang LANC injection engine (bytes 0–1)
+// ─────────────────────────────────────────────────────────────
+void processLancBitBang() {
 
+    if (!lancBitBangActive || activeCam < 0) return;
+
+    LancChannel &C = lanc[activeCam];
+
+    // We will inject exactly 2 bytes = 20 bits
+    const uint8_t totalBits = 20;
+
+    uint32_t t0 = lancStartTime;
+
+    // Bit 0 (start bit) is already LOW from the ISR
+
+    for (uint8_t bit = 1; bit < totalBits; bit++) {
+
+        // Wait for next bit boundary
+        uint32_t target = t0 + (bit * BIT_TIME_US);
+        while (micros() < target) {
+            // interrupts remain enabled, serial handshake still works
+        }
+
+        // Determine which byte and which bit we are sending
+        uint8_t byteIdx = bit / 10;          // 0 or 1
+        uint8_t bitIdx  = bit % 10;          // 0=start, 1..8=data, 9=stop
+
+        if (bitIdx == 0) {
+            digitalWrite(C.txPin, LOW);   // start bit
+        }
+        else if (bitIdx >= 1 && bitIdx <= 8) {
+            uint8_t b = C.txBuf[byteIdx];
+            uint8_t dataBit = (b >> (bitIdx - 1)) & 1;
+            digitalWrite(C.txPin, dataBit ? HIGH : LOW);
+        }
+        else {
+            digitalWrite(C.txPin, HIGH);  // stop bit
+        }
+    }
+
+    // Injection complete
+    lancBitBangActive = false;
+    C.cmdPending = false;
+    C.state = SEARCHING_SYNC;
+    lancPacketComplete = true;
+
+    // Multi-frame repeat support
+    if (lancFrameRepeatRemaining > 0) {
+        lancFrameRepeatRemaining--;
+
+        if (lancFrameRepeatRemaining > 0) {
+            C.cmdPending = true;
+            C.state = SEARCHING_SYNC;
+        }
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // FRAME PARSING ROUTINE
@@ -626,15 +609,19 @@ void setup() {
 // loop()
 // ═══════════════════════════════════════════════════════════════════════════════
 void loop() {
-  // 1. Service incoming USB-serial frames from host
-  parseSerialInput();
 
-  // 2. Handle completed LANC packet + multi-frame repeat
-  if (lancPacketComplete) {
-    Serial.println(rxAckCmplt);
-    lancPacketComplete = false;
+	// 1. Run bit-bang engine if active
+	processLancBitBang();
 
-    if (lancFrameRepeatRemaining > 0) {
+	// 2. Service incoming USB-serial frames from host
+	parseSerialInput();
+
+	// 3. Handle completed LANC packet + multi-frame repeat
+	if (lancPacketComplete) {
+		Serial.println(rxAckCmplt);
+		lancPacketComplete = false;
+
+		if (lancFrameRepeatRemaining > 0) {
 			lancFrameRepeatRemaining--;
 
 			if (lancFrameRepeatRemaining > 0 && activeCam >= 0) {
@@ -642,8 +629,8 @@ void loop() {
 					lanc[activeCam].cmdPending = true;
 					lanc[activeCam].state      = SEARCHING_SYNC;
 			}
-    }
-  }
+		}
+	}	
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -669,7 +656,6 @@ void initHardware() {
 			pinMode(lanc[i].txPin, OUTPUT);
 			digitalWrite(lanc[i].txPin, LOW);
 	}
-	
 
 	attachInterrupt(digitalPinToInterrupt(lanc[0].rxPin), lancTriggerISR0, FALLING);
 	attachInterrupt(digitalPinToInterrupt(lanc[1].rxPin), lancTriggerISR1, FALLING);
