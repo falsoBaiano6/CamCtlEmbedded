@@ -56,7 +56,8 @@ line and only listens to the status information transmitted by the camera. */
 #define CMD_TILT_UP     'U'
 #define CMD_TILT_DOWN   'D'
 #define CMD_PAN_STOP    'S'   // release all pan/tilt for active camera
-#define CMD_LANC        'Z' 
+#define CMD_LANC        'Z'
+#define CMD_LANC_STOP   'Y'  
 
 // ─── Pin assignments ─────────────────────────────────────────────────────────
 // CAM1
@@ -85,7 +86,6 @@ line and only listens to the status information transmitted by the camera. */
 #define NUM_CAMERAS         3
 
 // LANC constants
-#define NUM_REPEATED_FRAMES 10
 
 
 // LANC Wire color pin assignment:
@@ -171,7 +171,16 @@ enum FrameState {
     CMD,
     DATA
 };
-	
+
+// ─── Zoom State ──────────────────
+
+enum ZoomState {
+    ZOOM_IDLE,
+    ZOOM_ACTIVE
+};
+
+volatile ZoomState zoomState = ZOOM_IDLE;
+volatile uint8_t zoomSpeed = 0x08;   // default medium speed
 	
 // ─── LANC timing ──────────────────────────────────────────────────────────────
 // LANC runs at 9600 baud → 1 bit = 104.167 µs.
@@ -193,16 +202,15 @@ volatile uint32_t lancStartTime = 0;
 
 // Pending command loaded by main loop
 
+uint8_t b1 = 0;
+uint8_t b2 = 0;
+
 volatile bool    lancCmdReceived = false;   
 volatile bool    lancCmdPending = false;
 
 
 // variables tracking the LANC start timing state
 volatile bool actionComplete = false;
-
-// repeat counters for multi-frame operation
-volatile uint8_t  lancFrameRepeatCount    = 1;  // how many frames to send
-volatile uint8_t  lancFrameRepeatRemaining = 0; // countdown
 
 FspTimer lancTimer;
 
@@ -230,15 +238,12 @@ void selectLancChannel(int idx) {
 // ─────────────────────────────────────────────────────────────
 // Queue LANC command (bytes 0–1)
 // ─────────────────────────────────────────────────────────────
-void queueLancCommand(uint8_t b0, uint8_t b1, uint8_t repeatFrames = 1) {
+void queueLancCommand(uint8_t b0, uint8_t b1) {
     if (activeCam < 0) return;
 
     lanc[activeCam].txBuf[0] = b0;
     lanc[activeCam].txBuf[1] = b1;
     lanc[activeCam].cmdPending = true;
-		
-    lancFrameRepeatCount     = repeatFrames;
-    lancFrameRepeatRemaining = repeatFrames;
 }
 
 // Release all pan/tilt pins to HIGH-Z (INPUT, no pull-up)
@@ -424,15 +429,8 @@ void processLancBitBang() {
 	}
 
 	digitalWrite(C.txPin, LOW);  // ensure bus is released
-  // Multi-frame repeat support (correct placement)
-  if (lancFrameRepeatRemaining > 0) {
-    lancFrameRepeatRemaining--;
-
-		if (lancFrameRepeatRemaining > 0) {
-			C.cmdPending = true;
-			C.state = SEARCHING_SYNC;
-		}
-  }
+	C.cmdPending = true;
+	C.state = SEARCHING_SYNC;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -533,22 +531,42 @@ void processFrame(const char* buf, uint8_t len) {
 
     case CMD_PAN_LEFT:
       actuatePanTilt((uint8_t)camIdx, panLeftPin[camIdx]);
+		  // For safety, terminate Zoom in case it's still active
+			zoomState = ZOOM_IDLE;
+  		// Acknowledge received command
+			Serial.println(rxAckCmplt);
       break;
 
     case CMD_PAN_RIGHT:
       actuatePanTilt((uint8_t)camIdx, panRightPin[camIdx]);
+		  // For safety, terminate Zoom in case it's still active
+			zoomState = ZOOM_IDLE;
+  		// Acknowledge received command
+			Serial.println(rxAckCmplt);
       break;
 
     case CMD_TILT_UP:
       actuatePanTilt((uint8_t)camIdx, tiltUpPin[camIdx]);
+		  // For safety, terminate Zoom in case it's still active
+			zoomState = ZOOM_IDLE;
+  		// Acknowledge received command
+			Serial.println(rxAckCmplt);
       break;
 
     case CMD_TILT_DOWN:
       actuatePanTilt((uint8_t)camIdx, tiltDownPin[camIdx]);
+		  // For safety, terminate Zoom in case it's still active
+			zoomState = ZOOM_IDLE;
+  		// Acknowledge received command
+			Serial.println(rxAckCmplt);
       break;
 
     case CMD_PAN_STOP:
       releasePanTilt((uint8_t)camIdx);
+		  // For safety, terminate Zoom in case it's still active
+			zoomState = ZOOM_IDLE;
+  		// Acknowledge received command
+			Serial.println(rxAckCmplt);
       break;
 
     case CMD_LANC:
@@ -568,13 +586,22 @@ void processFrame(const char* buf, uint8_t len) {
 				}
 
         char temp1[3] = { hexStr[0], hexStr[1], '\0' };
-        uint8_t b1 = (uint8_t)strtol(temp1, NULL, 16);
+        b1 = (uint8_t)strtol(temp1, NULL, 16);
         char temp2[3] = {hexStr[2], hexStr[3], '\0'};
-        uint8_t b2 = (uint8_t)strtol(temp2, NULL, 16);
+        b2 = (uint8_t)strtol(temp2, NULL, 16);
 
         lancCmdReceived = true;
-        queueLancCommand(b1, b2, NUM_REPEATED_FRAMES);
+				zoomState = ZOOM_ACTIVE;
+				// Acknowledge received command
+				Serial.println(rxAckCmplt);
       }
+      break;
+			
+    case CMD_LANC_STOP:
+		  // Intentional zoom termination:
+		  zoomState = ZOOM_IDLE;
+  		// Acknowledge received command
+			Serial.println(rxAckCmplt);
       break;
 
     default:
@@ -621,17 +648,19 @@ void setup() {
 // ═══════════════════════════════════════════════════════════════════════════════
 void loop() {
 
+	// Maintain continuous zoom
+	if (zoomState == ZOOM_ACTIVE && !lancBitBangActive && lancCmdReceived) {
+    // If we are not currently injecting and no new host command arrived,
+    // send another zoom command for the next frame.
+		queueLancCommand(b1, b2);	
+	}
+
 	// 1. Run bit-bang engine if active
 	processLancBitBang();
 
 	// 2. Service incoming USB-serial frames from host
 	parseSerialInput();
 
-	// 3. Handle completed LANC packet + multi-frame repeat
-	if (lancPacketComplete) {
-		Serial.println(rxAckCmplt);
-		lancPacketComplete = false;
-	}	
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -668,8 +697,6 @@ void initHardware() {
   activeCam     = -1;
   rxDataLen     = 0;
   lancPacketComplete = false;
-  lancFrameRepeatCount     = 1;
-  lancFrameRepeatRemaining = 0;
 	
   // --- Host handshake ---
   // Wait for HostListeningCode '!'
