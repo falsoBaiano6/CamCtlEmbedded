@@ -34,7 +34,7 @@ line and only listens to the status information transmitted by the camera. */
 #include <WiFiUdp.h>
 #include "Arduino.h"
 
-// ─── Protocol constants ──────────────────────────────────────────────────────
+// ─── Host Communication Protocol constants ──────────────────────────────────────────────────────
 #define HostListeningCode '!'
 #define STX               '<'
 #define ETX               '>'
@@ -83,6 +83,10 @@ line and only listens to the status information transmitted by the camera. */
 #define CAM3_TILT_DOWN      4
 #define CAM3_TILT_UP       19
 #define NUM_CAMERAS         3
+
+// LANC constants
+#define NUM_REPEATED_FRAMES 10
+
 
 // LANC Wire color pin assignment:
 // Tip -- White
@@ -300,8 +304,6 @@ void lancTriggerISR(int ch) {
           // Record start time for bit-bang engine
           lancStartTime = micros();
           lancBitBangActive = true;
-					// Inject start bit immediately
-					digitalWrite(C.txPin, LOW);
 			}
 			break;
 
@@ -371,57 +373,66 @@ void lancTimerISR(timer_callback_args_t *) {
 // ─────────────────────────────────────────────────────────────
 void processLancBitBang() {
 
-    if (!lancBitBangActive || activeCam < 0) return;
+	if (!lancBitBangActive || activeCam < 0) return;
 
-    LancChannel &C = lanc[activeCam];
+	LancChannel &C = lanc[activeCam];
 
-    // We will inject exactly 2 bytes = 20 bits
-    const uint8_t totalBits = 20;
+	// We will inject exactly 2 bytes = 20 bits
+	const uint8_t totalBits = 20;
 
-    uint32_t t0 = lancStartTime;
+	uint32_t t0 = lancStartTime;
 
-    // Bit 0 (start bit) is already LOW from the ISR
+	// Bit 0 (start bit) is already LOW from the ISR
 
-    for (uint8_t bit = 1; bit < totalBits; bit++) {
+	for (uint8_t bit = 1; bit < totalBits; bit++) {
 
-        // Wait for next bit boundary
-        uint32_t target = t0 + (bit * BIT_TIME_US);
-        while (micros() < target) {
-            // interrupts remain enabled, serial handshake still works
-        }
+		// Wait for next bit boundary
+		uint32_t target = t0 + (bit * BIT_TIME_US);
+		while (micros() < target) {
+				// interrupts remain enabled, serial handshake still works
+		}
 
-        // Determine which byte and which bit we are sending
-        uint8_t byteIdx = bit / 10;          // 0 or 1
-        uint8_t bitIdx  = bit % 10;          // 0=start, 1..8=data, 9=stop
+		// Determine which byte and which bit we are sending
+		uint8_t byteIdx = bit / 10;          // 0 or 1
+		uint8_t bitIdx  = bit % 10;          // 0=start, 1..8=data, 9=stop
 
-        if (bitIdx == 0) {
-            digitalWrite(C.txPin, LOW);   // start bit
-        }
-        else if (bitIdx >= 1 && bitIdx <= 8) {
-            uint8_t b = C.txBuf[byteIdx];
-            uint8_t dataBit = (b >> (bitIdx - 1)) & 1;
-            digitalWrite(C.txPin, dataBit ? HIGH : LOW);
-        }
-        else {
-            digitalWrite(C.txPin, HIGH);  // stop bit
-        }
-    }
+		if (bitIdx == 0) {
+			// Start bit: always a 0 → pull bus LOW
+			digitalWrite(C.txPin, HIGH);   // transistor ON → bus LOW
+		}
+		else if (bitIdx >= 1 && bitIdx <= 8) {
+			uint8_t b = C.txBuf[byteIdx];
+			uint8_t dataBit = (b >> (bitIdx - 1)) & 1;
 
-    // Injection complete
-    lancBitBangActive = false;
-    C.cmdPending = false;
-    C.state = SEARCHING_SYNC;
-    lancPacketComplete = true;
+			if (dataBit == 0) {
+					// Inject a 0 → pull bus LOW
+					digitalWrite(C.txPin, LOW);   // transistor ON
+			} else {
+					// Inject a 1 → release bus
+					digitalWrite(C.txPin, HIGH);    // transistor OFF → bus floats HIGH
+			}
+		}
+		else {
+			// Stop bit → release bus
+			digitalWrite(C.txPin, LOW);        // transistor OFF → bus floats HIGH
+		}
+		// Injection complete
+		lancBitBangActive = false;
+		C.cmdPending = false;
+		C.state = SEARCHING_SYNC;
+		lancPacketComplete = true;		
+	}
 
-    // Multi-frame repeat support
-    if (lancFrameRepeatRemaining > 0) {
-        lancFrameRepeatRemaining--;
+	digitalWrite(C.txPin, LOW);  // ensure bus is released
+  // Multi-frame repeat support (correct placement)
+  if (lancFrameRepeatRemaining > 0) {
+    lancFrameRepeatRemaining--;
 
-        if (lancFrameRepeatRemaining > 0) {
-            C.cmdPending = true;
-            C.state = SEARCHING_SYNC;
-        }
-    }
+		if (lancFrameRepeatRemaining > 0) {
+			C.cmdPending = true;
+			C.state = SEARCHING_SYNC;
+		}
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -562,7 +573,7 @@ void processFrame(const char* buf, uint8_t len) {
         uint8_t b2 = (uint8_t)strtol(temp2, NULL, 16);
 
         lancCmdReceived = true;
-        queueLancCommand(b1, b2, 3);
+        queueLancCommand(b1, b2, NUM_REPEATED_FRAMES);
       }
       break;
 
@@ -620,16 +631,6 @@ void loop() {
 	if (lancPacketComplete) {
 		Serial.println(rxAckCmplt);
 		lancPacketComplete = false;
-
-		if (lancFrameRepeatRemaining > 0) {
-			lancFrameRepeatRemaining--;
-
-			if (lancFrameRepeatRemaining > 0 && activeCam >= 0) {
-					// Re-arm same command for next frame
-					lanc[activeCam].cmdPending = true;
-					lanc[activeCam].state      = SEARCHING_SYNC;
-			}
-		}
 	}	
 }
 
