@@ -305,20 +305,22 @@ void lancTriggerISR(int ch) {
 	switch (C.state) {
 
 		case SEARCHING_SYNC:
+    if(zoomState == ZOOM_ACTIVE) {
 			if (gap >= SYNC_GAP_MIN_US && C.cmdPending) {
 					C.state   = PROCESSING_BYTE;
           // Record start time for bit-bang engine
           lancStartTime = micros();
           lancBitBangActive = true;
 			}
-			break;
+    }
+		break;
 
 		case WAITING_START:
-				// For future multi-byte sequences
-				break;
+			// For future multi-byte sequences
+			break;
 
 		default:
-				break;
+			break;
 	}
 }
 
@@ -471,9 +473,6 @@ void parseSerialInput() {
 
     case FrameState::CMD:
       validCmd = isValidCmd(c);
-			if(c == CMD_LANC_STOP) {
-				trap = true;
-			}
       if (validCmd) {
         rxDataBuf[rxDataLen++] = c;
         Serial.println(rxAckCMD);   // ack CID
