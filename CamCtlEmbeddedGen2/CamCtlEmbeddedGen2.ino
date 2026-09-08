@@ -147,8 +147,8 @@ const uint8_t allPanTiltPins[] = {
 };
 
 const uint8_t validCamValues[NUM_CAMERAS] = { cam1Id, cam2Id, cam3Id };
-#define NUM_COMMANDS 6
-const uint8_t validCmdValues[NUM_COMMANDS] = { CMD_PAN_LEFT, CMD_PAN_RIGHT, CMD_TILT_UP, CMD_TILT_DOWN, CMD_PAN_STOP, CMD_LANC }; 
+#define NUM_COMMANDS 7
+const uint8_t validCmdValues[NUM_COMMANDS] = { CMD_PAN_LEFT, CMD_PAN_RIGHT, CMD_TILT_UP, CMD_TILT_DOWN, CMD_PAN_STOP, CMD_LANC, CMD_LANC_STOP }; 
 volatile uint8_t lancActiveSigPin = CAM1_LANC_SIG_IN;
 
 // ─────────────────────────────────────────────────────────────
@@ -194,6 +194,7 @@ volatile bool lancPacketComplete = false;
 FrameState currentState = IDLE;
 static bool validCamId = false;
 static bool validCmd = false;
+volatile bool trap = false;
 
 // ─── Bit-Bang control ───────────────────────────────────────────────────────────
 volatile bool lancBitBangActive = false;
@@ -470,15 +471,18 @@ void parseSerialInput() {
 
     case FrameState::CMD:
       validCmd = isValidCmd(c);
+			if(c == CMD_LANC_STOP) {
+				trap = true;
+			}
       if (validCmd) {
         rxDataBuf[rxDataLen++] = c;
         Serial.println(rxAckCMD);   // ack CID
         currentState = FrameState::DATA;
       }
-	  else {
-        currentState = FrameState::IDLE;
-	  }
-    break;
+			else {
+				currentState = FrameState::IDLE;
+			}
+			break;
 
     case FrameState::DATA:
       if (c == ETX) {
