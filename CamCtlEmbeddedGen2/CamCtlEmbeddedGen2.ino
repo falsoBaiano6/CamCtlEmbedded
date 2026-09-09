@@ -295,6 +295,29 @@ bool isValidCmd(uint8_t target) {
   return false; // Checked everything, no match
 }
 
+void processLancCmd(const char* buf, uint8_t len) {
+	
+  // Expect 2 more hex bytes in buf[2..3] and buf[4..5] (spaces optional)
+  // Strip spaces to collect hex chars
+  char hexStr[5] = { 0 };
+  uint8_t hi = 2;
+  uint8_t hIdx = 0;
+  while (hi < len && hIdx < 4) {
+  	if (buf[hi] != ' ') hexStr[hIdx++] = buf[hi];
+  	hi++;
+  }
+  if (hIdx < 4) { 
+  	Serial.println("ERR:LANC_DATA");
+  }
+  
+  char temp1[3] = { hexStr[0], hexStr[1], '\0' };
+  b1 = (uint8_t)strtol(temp1, NULL, 16);
+  char temp2[3] = {hexStr[2], hexStr[3], '\0'};
+  b2 = (uint8_t)strtol(temp2, NULL, 16);
+}
+
+
+
 // ─────────────────────────────────────────────────────────────
 // Public API: set continuous zoom state
 // ─────────────────────────────────────────────────────────────
@@ -319,30 +342,32 @@ void lancTriggerISR(int ch) {
 
 	switch (lancState) {
 
-	case SEARCHING_SYNC:
-		// FRAME SYNC: long gap → start of byte 0
-		if (gap >= FRAME_SYNC_MIN_US) {
-				currentByte   = 0;
-				lancStartTime = now;
-				lancState     = BYTE0_START;
-				
-		}
-		break;
-		
-  // BYTE SYNC: start of byte 1 (short gap after byte 0 stop/padding)
-	case BYTE0_STOP:
-		// After stop bit + padding, next falling edge is start of next byte
-		// No gap check needed; we already know we're inside a frame
-			currentByte = 1;
-			lancStartTime = now;
-			lancState     = BYTE1_START;
-		break;
-
-	default:
+  if(zoomState == ZOOM_ACTIVE || zoomState == ZOOM_STOP) {
+		case SEARCHING_SYNC:
+			// FRAME SYNC: long gap → start of byte 0
+			if (gap >= FRAME_SYNC_MIN_US) {
+					currentByte   = 0;
+					lancStartTime = now;
+					lancState     = BYTE0_START;
+					
+			}
 			break;
 			
-	    // We do not sync bytes 2–7 here; status reading is optional and separate		
-	}		
+		// BYTE SYNC: start of byte 1 (short gap after byte 0 stop/padding)
+		case BYTE0_STOP:
+			// After stop bit + padding, next falling edge is start of next byte
+			// No gap check needed; we already know we're inside a frame
+				currentByte = 1;
+				lancStartTime = now;
+				lancState     = BYTE1_START;
+			break;
+
+		default:
+				break;
+				
+				// We do not sync bytes 2–7 here; status reading is optional and separate		
+		}
+	}	
 }
 
 // Attach ISRs
@@ -448,6 +473,10 @@ void processLancBitBang() {
         // Return to SEARCHING_SYNC immediately so we see the next frame gap
         lancState     = SEARCHING_SYNC;
         currentByte   = 0;
+				if (zoomState == ZOOM_STOP) {
+					zoomState = ZOOM_IDLE;
+				}
+					
         break;
 
     case SEARCHING_SYNC:
@@ -593,34 +622,19 @@ void processFrame(const char* buf, uint8_t len) {
       break;
 
     case CMD_LANC:
+		
       // Expect 2 more hex bytes in buf[2..3] and buf[4..5] (spaces optional)
       // Strip spaces to collect hex chars
-      {
-        char hexStr[5] = { 0 };
-        uint8_t hi = 2;
-        uint8_t hIdx = 0;
-        while (hi < len && hIdx < 4) {
-          if (buf[hi] != ' ') hexStr[hIdx++] = buf[hi];
-          hi++;
-        }
-        if (hIdx < 4) { 
-					Serial.println("ERR:LANC_DATA");
-					break; 
-				}
-
-        char temp1[3] = { hexStr[0], hexStr[1], '\0' };
-        b1 = (uint8_t)strtol(temp1, NULL, 16);
-        char temp2[3] = {hexStr[2], hexStr[3], '\0'};
-        b2 = (uint8_t)strtol(temp2, NULL, 16);
-
-        lancCmdReceived = true;
-				zoomState = ZOOM_ACTIVE;
-				// Acknowledge received command
-				Serial.println(rxAckCmplt);
-      }
+			processLancCmd(buf, len);				
+			lancCmdReceived = true;
+			zoomState = ZOOM_ACTIVE;
+			// Acknowledge received command
+			Serial.println(rxAckCmplt);
       break;
 			
     case CMD_LANC_STOP:
+		
+			processLancCmd(buf, len);				
 		  // Intentional zoom termination:
 		  zoomState = ZOOM_STOP;
   		// Acknowledge received command
@@ -646,7 +660,7 @@ void setup() {
 void loop() {
 
 	// Maintain continuous zoom
-	if (zoomState == ZOOM_ACTIVE && !lancBitBangActive && lancCmdReceived) {
+	if ((zoomState == ZOOM_ACTIVE || zoomState == ZOOM_STOP) && !lancBitBangActive && lancCmdReceived) {
     // If we are not currently injecting and no new host command arrived,
     // send another zoom command for the next frame.
 		queueLancCommand(b1, b2);	
