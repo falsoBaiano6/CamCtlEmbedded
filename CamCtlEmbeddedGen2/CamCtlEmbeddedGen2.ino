@@ -321,8 +321,9 @@ void processLancCmd(const char* buf, uint8_t len) {
 // ─────────────────────────────────────────────────────────────
 // Public API: set continuous zoom state
 // ─────────────────────────────────────────────────────────────
-void startZoom()  { zoomState = ZOOM_ACTIVE;  }
-void stopZoom()     { zoomState = ZOOM_IDLE; }
+void zoomStart()	{ zoomState = ZOOM_ACTIVE; }
+void zoomStop() 	{ zoomState = ZOOM_STOP; }
+void zoomIdle()		{ zoomState = ZOOM_IDLE; }
 
 
 // ─── ISRs ─────────────────────────────────────────────────────────────────
@@ -474,7 +475,7 @@ void processLancBitBang() {
         lancState     = SEARCHING_SYNC;
         currentByte   = 0;
 				if (zoomState == ZOOM_STOP) {
-					zoomState = ZOOM_IDLE;
+					zoomIdle();
 				}
 					
         break;
@@ -582,41 +583,48 @@ void processFrame(const char* buf, uint8_t len) {
   switch (cmd) {
 
     case CMD_PAN_LEFT:
-      actuatePanTilt((uint8_t)camIdx, panLeftPin[camIdx]);
-		  // For safety, terminate Zoom in case it's still active
-			zoomState = ZOOM_IDLE;
+			if(zoomState == ZOOM_IDLE) // don't actuate pan/tilt if zoom is active
+			{
+				actuatePanTilt((uint8_t)camIdx, panLeftPin[camIdx]);
+			}
   		// Acknowledge received command
 			Serial.println(rxAckCmplt);
       break;
 
     case CMD_PAN_RIGHT:
-      actuatePanTilt((uint8_t)camIdx, panRightPin[camIdx]);
-		  // For safety, terminate Zoom in case it's still active
-			zoomState = ZOOM_IDLE;
+			if(zoomState == ZOOM_IDLE) // don't actuate pan/tilt if zoom is active
+			{
+				actuatePanTilt((uint8_t)camIdx, panRightPin[camIdx]);
+			}
   		// Acknowledge received command
 			Serial.println(rxAckCmplt);
       break;
 
     case CMD_TILT_UP:
-      actuatePanTilt((uint8_t)camIdx, tiltUpPin[camIdx]);
-		  // For safety, terminate Zoom in case it's still active
-			zoomState = ZOOM_IDLE;
+			if(zoomState == ZOOM_IDLE) // don't actuate pan/tilt if zoom is active
+			{
+				actuatePanTilt((uint8_t)camIdx, tiltUpPin[camIdx]);
+			}
   		// Acknowledge received command
 			Serial.println(rxAckCmplt);
       break;
 
     case CMD_TILT_DOWN:
-      actuatePanTilt((uint8_t)camIdx, tiltDownPin[camIdx]);
-		  // For safety, terminate Zoom in case it's still active
-			zoomState = ZOOM_IDLE;
+			if(zoomState == ZOOM_IDLE) // don't actuate pan/tilt if zoom is active
+			{
+				actuatePanTilt((uint8_t)camIdx, tiltDownPin[camIdx]);
+			}
   		// Acknowledge received command
 			Serial.println(rxAckCmplt);
       break;
 
     case CMD_PAN_STOP:
-      releasePanTilt((uint8_t)camIdx);
+			if(zoomState == ZOOM_IDLE) // don't actuate pan/tilt if zoom is active
+			{
+				releasePanTilt((uint8_t)camIdx);
+			}
 		  // For safety, terminate Zoom in case it's still active
-			zoomState = ZOOM_IDLE;
+			zoomIdle();
   		// Acknowledge received command
 			Serial.println(rxAckCmplt);
       break;
@@ -627,7 +635,7 @@ void processFrame(const char* buf, uint8_t len) {
       // Strip spaces to collect hex chars
 			processLancCmd(buf, len);				
 			lancCmdReceived = true;
-			zoomState = ZOOM_ACTIVE;
+			zoomStart();
 			// Acknowledge received command
 			Serial.println(rxAckCmplt);
       break;
@@ -636,7 +644,7 @@ void processFrame(const char* buf, uint8_t len) {
 		
 			processLancCmd(buf, len);				
 		  // Intentional zoom termination:
-		  zoomState = ZOOM_STOP;
+		  zoomStop();
   		// Acknowledge received command
 			Serial.println(rxAckCmplt);
       break;
