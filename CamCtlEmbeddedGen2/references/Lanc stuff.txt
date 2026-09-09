@@ -2296,3 +2296,257 @@ Pan/tilt coordination (synchronized motion with zoom)
 Host protocol extensions (binary packets instead of ASCII)
 
 Just tell me what direction you want to go.
+
+I think I see the problem on the scope: 
+
+The first byte (byte 0) is being written correctly on the wire in Little Endian format -- seen on the wire as HHHLHLHH.  The problem is in how byte 1 is being written. The tx "slave injection" output is being driven by the slave one bit time after the data bit in byte 0. The slave should never drive the tx during start and stop bits -- this is done exclusively by the camera master. The master adds padding between bytes in a frame, so it drives the true start bit at the end of it's padding time to start byte 1. The actual data seen by the camera looks more like 0x04 bit-reversed -- seen on the wire as HHLHHHHH  not 0x10 bit-reversed -- which would be seen on the wire as HHHHHHHL.
+
+This strongly implicates bit-handling in byte 1 in the bit-ban process. It waits out the start bit before the first byte 0, but somehow it's not waiting for it (and the padding after the stop bit) for byte 1.  I suspect the falseley injected bit at the very end of byte 0 (during the padding) is ignored by the camera, and since the direction|speed byte for Zoom in is 0x00, the bit handling problem didn't matter, because all the bits are zero.       
+
+What's lacking here is a proper detection of the start bit as driven by the camera.  The ISR detects the first start bit in a frame, but something needs to detect start bits in bytes 1-7. The bit-bang process should deal only with the 8 data bits in bytes 0-1.  I assume the timer ISR logic is also faulty because it simply counted bit times, and didn't account for the post-stop-bit padding that the camera is inserting.   
+
+Below are the current bit-bang process and the timer ISR.  Please regenerate the code for an engine that handles only the data, and waits appropriately for each start bit as driven by the camera master. I'm not yet using status info from reading bytes 2-7, but think may would be useful to have in the future.
+
+// ─────────────────────────────────────────────────────────────
+// Bit-bang LANC injection engine (bytes 0–1)
+// ─────────────────────────────────────────────────────────────
+void processLancBitBang() {
+
+	if (!lancBitBangActive || activeCam < 0) return;
+
+	LancChannel &C = lanc[activeCam];
+
+	// We will inject exactly 2 bytes = 20 bits
+	const uint8_t totalBits = 20;
+
+	uint32_t t0 = lancStartTime;
+
+	// Bit 0 (start bit) is already LOW from the ISR
+
+	for (uint8_t bit = 1; bit < totalBits; bit++) {
+
+		// Wait for next bit boundary
+		uint32_t target = t0 + (bit * BIT_TIME_US);
+		while (micros() < target) {
+				// interrupts remain enabled, serial handshake still works
+		}
+
+		// Determine which byte and which bit we are sending
+		uint8_t byteIdx = bit / 10;          // 0 or 1
+		uint8_t bitIdx  = bit % 10;          // 0=start, 1..8=data, 9=stop
+
+		if (bitIdx == 0) {
+			// Start bit: always a 0 → pull bus LOW
+			digitalWrite(C.txPin, HIGH);   // transistor ON → bus LOW
+		}
+		else if (bitIdx >= 1 && bitIdx <= 8) {
+			uint8_t b = C.txBuf[byteIdx];
+			uint8_t dataBit = (b >> (bitIdx - 1)) & 1;
+
+			if (dataBit == 0) {
+					// Inject a 0 → pull bus LOW
+					digitalWrite(C.txPin, LOW);   // transistor ON
+			} else {
+					// Inject a 1 → release bus
+					digitalWrite(C.txPin, HIGH);    // transistor OFF → bus floats HIGH
+			}
+		}
+		else {
+			// Stop bit → release bus
+			digitalWrite(C.txPin, LOW);        // transistor OFF → bus floats HIGH
+		}
+		// Injection complete
+		lancBitBangActive = false;
+		C.cmdPending = false;
+		C.state = SEARCHING_SYNC;
+		lancPacketComplete = true;		
+	}
+
+	digitalWrite(C.txPin, LOW);  // ensure bus is released
+	C.cmdPending = true;
+	C.state = SEARCHING_SYNC;
+}
+See my thinking
+You’re exactly right about what’s broken—and your scope description is spot‑on:
+
+You’re treating the whole frame as one 20‑bit stream.
+
+The camera actually treats it as two separate bytes, each with:
+
+Start bit (master)
+
+8 data bits (slave may override)
+
+Stop bit (master)
+
+Padding (master) before the next start bit.
+
+So byte 0 is fine, but byte 1 is being injected one bit too early, during padding/start, and the data bits are shifted. For 0x00 that doesn’t hurt; for 0x10 it completely changes the meaning.
+
+You asked for a regenerated engine that:
+
+Only drives the 8 data bits of bytes 0–1.
+
+Waits for the camera’s start bit for each byte.
+
+Leaves start/stop bits and padding entirely to the master.
+
+Is future‑friendly for reading bytes 2–7.
+
+Below is a clean, self‑contained version that does exactly that.
+
+Core idea
+ISR detects each start bit (falling edge after padding).
+
+For byte 0 and byte 1, we:
+
+Record lancStartTime at that start bit.
+
+Bit‑bang only bits 1–8 (data) relative to that time.
+
+We do not drive during bit 0 (start) or bit 9 (stop).
+
+We do not assume byte 1 starts exactly 10 bit times after byte 0; we wait for the camera’s next start.
+
+I’ll assume you already have:
+
+BIT_TIME_US defined.
+
+LancChannel lanc[] with txPin, txBuf[2], etc.
+
+An ISR that sees falling edges on the LANC bus.
+
+New state fields
+Add these globals:
+
+cpp
+volatile bool lancBitBangActive = false;
+volatile uint8_t lancByteIndex = 0;      // 0 or 1
+volatile uint32_t lancStartTime = 0;     // start bit time for current byte
+ISR: detect start bits for byte 0 and byte 1
+In your LANC edge ISR (where you currently detect sync/start), update it like this:
+
+cpp
+void lancEdgeISR() {
+    // Called on every falling edge of the LANC bus
+
+    uint32_t now = micros();
+
+    if (activeCam < 0) return;
+    LancChannel &C = lanc[activeCam];
+
+    // Detect frame sync (first start bit of byte 0)
+    // You already have gap detection; keep that logic.
+    // When you decide "this is the start of byte 0":
+
+    if (!lancBitBangActive && C.cmdPending && lancByteIndex == 0) {
+        // Start of byte 0
+        lancStartTime = now;
+        lancBitBangActive = true;
+        // We do NOT drive start bit; camera already pulled bus low.
+    }
+    else if (!lancBitBangActive && C.cmdPending && lancByteIndex == 1) {
+        // Start of byte 1 (after padding)
+        lancStartTime = now;
+        lancBitBangActive = true;
+        // Again, we do NOT drive start bit.
+    }
+
+    // You can keep your existing state machine for SEARCHING_SYNC, etc.
+}
+The key change:
+We treat byte 0 and byte 1 separately, each with its own lancStartTime.
+
+Bit‑bang engine: only data bits, per byte
+Replace your processLancBitBang() with this:
+
+cpp
+// Bit-bang LANC injection engine (bytes 0–1, data bits only)
+void processLancBitBang() {
+
+    if (!lancBitBangActive || activeCam < 0) return;
+
+    LancChannel &C = lanc[activeCam];
+
+    // We only send 8 data bits for the current byte
+    const uint8_t dataBits = 8;
+
+    uint32_t t0 = lancStartTime;
+
+    // Bits 1..8 are data; bit 0 (start) and bit 9 (stop) are camera-owned.
+
+    for (uint8_t bitIdx = 1; bitIdx <= dataBits; bitIdx++) {
+
+        // Wait for this data bit boundary
+        uint32_t target = t0 + (bitIdx * BIT_TIME_US);
+        while (micros() < target) {
+            // interrupts remain enabled
+        }
+
+        // LSB-first: bitIdx 1..8 → bit 0..7 of the byte
+        uint8_t b = C.txBuf[lancByteIndex];
+        uint8_t dataBit = (b >> (bitIdx - 1)) & 1;
+
+        // Your hardware: HIGH = bus LOW, LOW = bus HIGH
+        if (dataBit == 0) {
+            // Inject 0 → bus LOW
+            digitalWrite(C.txPin, HIGH);
+        } else {
+            // Inject 1 → bus HIGH
+            digitalWrite(C.txPin, LOW);
+        }
+    }
+
+    // Done with data bits for this byte; release bus before stop bit
+    digitalWrite(C.txPin, LOW);
+
+    lancBitBangActive = false;
+
+    // Advance to next byte (0 → 1)
+    if (lancByteIndex == 0) {
+        lancByteIndex = 1;
+        // We do NOT start byte 1 here; we wait for the camera's next start bit
+        // ISR will see the next falling edge and re-arm lancBitBangActive for byte 1.
+    }
+    else {
+        // Finished byte 1; command complete
+        lancByteIndex = 0;
+        C.cmdPending = false;
+        C.state = SEARCHING_SYNC;
+        lancPacketComplete = true;
+
+        // If you want to re-arm for repeats or future commands, do it here.
+        // e.g., C.cmdPending = true; for continuous zoom, etc.
+    }
+}
+How this fixes what you saw on the scope
+Byte 0:
+
+ISR sees start bit → sets lancStartTime, lancByteIndex = 0.
+
+Bit‑bang drives only bits 1–8.
+
+Camera owns start, stop, and padding → waveform stays HHHLHLHH as you observed.
+
+Byte 1:
+
+Camera inserts padding after byte 0 stop.
+
+Camera then drives the true start bit for byte 1.
+
+ISR sees that falling edge → sets new lancStartTime, lancByteIndex = 1.
+
+Bit‑bang drives only bits 1–8 of byte 1, aligned to that start.
+
+No extra bit at the end of byte 0, no shift, no HHLHHHHH instead of HHHHHHHL.
+
+Because zoom‑in’s direction|speed byte is 0x00, your old misalignment didn’t hurt it.
+For zoom‑out (0x10), the single “1” bit was shifted into the wrong position, and the camera decoded it as something else (e.g., 0x04).
+
+This engine removes that shift entirely.
+
+If you want, next step could be:
+
+Adding a parallel read engine for bytes 2–7 (status), using the same start‑bit detection.
+
+Building a small debug mode that logs the decoded bytes so you can see exactly what the camera thinks you’re sending.
