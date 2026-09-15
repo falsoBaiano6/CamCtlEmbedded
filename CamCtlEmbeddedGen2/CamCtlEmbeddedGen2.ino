@@ -60,7 +60,7 @@ line and only listens to the status information transmitted by the camera. */
 #define CMD_LANC_STOP   'Y'  
 
 // ─── Pin assignments ─────────────────────────────────────────────────────────
-// CAM1
+// CAM1 (full support -- wire CAM1 here)
 #define CAM1_LANC_CMD_OUT   5
 #define CAM1_LANC_SIG_IN   18
 #define CAM1_PAN_LEFT      10
@@ -68,7 +68,7 @@ line and only listens to the status information transmitted by the camera. */
 #define CAM1_TILT_DOWN     12
 #define CAM1_TILT_UP       13
 
-// CAM2
+// CAM2 (full support -- wire CAM3 here)
 #define CAM2_LANC_CMD_OUT   6
 #define CAM2_LANC_SIG_IN   16
 #define CAM2_PAN_LEFT      17
@@ -76,14 +76,14 @@ line and only listens to the status information transmitted by the camera. */
 #define CAM2_TILT_DOWN      8
 #define CAM2_TILT_UP       15
 
-// CAM3
-#define CAM3_LANC_CMD_OUT   9
-#define CAM3_LANC_SIG_IN   14
-#define CAM3_PAN_LEFT       2
+// CAM3 (no zoom support -- wire CAM2 here)
+#define CAM3_PAN_LEFT       2 
 #define CAM3_PAN_RIGHT      3
 #define CAM3_TILT_DOWN      4
 #define CAM3_TILT_UP       19
+
 #define NUM_CAMERAS         3
+#define NULL_PIN           -1
 
 // LANC constants
 
@@ -133,8 +133,8 @@ struct LancChannel {
 LancChannel lanc[3];
 
 // ─── Pin lookup tables (index: 0=CAM1, 1=CAM2, 2=CAM3) ───────────────────────
-const uint8_t lancCmdPin[NUM_CAMERAS]  = { CAM1_LANC_CMD_OUT, CAM2_LANC_CMD_OUT, CAM3_LANC_CMD_OUT };
-const uint8_t lancSigPin[NUM_CAMERAS]  = { CAM1_LANC_SIG_IN,  CAM2_LANC_SIG_IN,  CAM3_LANC_SIG_IN  };
+const uint8_t lancCmdPin[NUM_CAMERAS]  = { CAM1_LANC_CMD_OUT, CAM2_LANC_CMD_OUT, NULL_PIN };
+const uint8_t lancSigPin[NUM_CAMERAS]  = { CAM1_LANC_SIG_IN,  CAM2_LANC_SIG_IN, NULL_PIN };
 const uint8_t panLeftPin[NUM_CAMERAS]  = { CAM1_PAN_LEFT,  CAM2_PAN_LEFT,  CAM3_PAN_LEFT  };
 const uint8_t panRightPin[NUM_CAMERAS] = { CAM1_PAN_RIGHT, CAM2_PAN_RIGHT, CAM3_PAN_RIGHT };
 const uint8_t tiltUpPin[NUM_CAMERAS]   = { CAM1_TILT_UP,   CAM2_TILT_UP,   CAM3_TILT_UP   };
@@ -149,7 +149,7 @@ const uint8_t allPanTiltPins[] = {
 const uint8_t validCamValues[NUM_CAMERAS] = { cam1Id, cam2Id, cam3Id };
 #define NUM_COMMANDS 7
 const uint8_t validCmdValues[NUM_COMMANDS] = { CMD_PAN_LEFT, CMD_PAN_RIGHT, CMD_TILT_UP, CMD_TILT_DOWN, CMD_PAN_STOP, CMD_LANC, CMD_LANC_STOP }; 
-volatile uint8_t lancActiveSigPin = CAM1_LANC_SIG_IN;
+volatile uint8_t lancActiveSigPin = CAM1_LANC_SIG_IN; // default = CAM1
 
 // ─────────────────────────────────────────────────────────────
 // State Machine States
@@ -233,7 +233,7 @@ static uint8_t rxDataLen = 0;
 void selectLancChannel(int idx) {
     activeCam = idx;   // 0..2 or -1 for inactive
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 2; i++) {
         lanc[i].active = (i == idx);
         lanc[i].state  = SEARCHING_SYNC;
         lanc[i].statusByteIdx = 2;
@@ -328,6 +328,10 @@ void zoomIdle()		{ zoomState = ZOOM_IDLE; }
 
 // ─── ISRs ─────────────────────────────────────────────────────────────────
 
+void testISR() {
+    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+}
+
 // ─────────────────────────────────────────────────────────────
 // LANC edge ISR: frame sync + byte start sync
 // Called on every falling edge of the LANC bus
@@ -374,7 +378,6 @@ void lancTriggerISR(int ch) {
 // Attach ISRs
 void lancTriggerISR0() { lancTriggerISR(0); }
 void lancTriggerISR1() { lancTriggerISR(1); }
-void lancTriggerISR2() { lancTriggerISR(2); }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -633,6 +636,7 @@ void processFrame(const char* buf, uint8_t len) {
 		
       // Expect 2 more hex bytes in buf[2..3] and buf[4..5] (spaces optional)
       // Strip spaces to collect hex chars
+			// Only applies to CAM1 or CAM2
 			processLancCmd(buf, len);				
 			lancCmdReceived = true;
 			zoomStart();
@@ -698,18 +702,17 @@ void initHardware() {
 
 	lanc[0] = {CAM1_LANC_SIG_IN, CAM1_LANC_CMD_OUT, micros(), false, false, {0}, {0}, 0, 0, SEARCHING_SYNC};
 	lanc[1] = {CAM2_LANC_SIG_IN, CAM2_LANC_CMD_OUT, micros(), false, false, {0}, {0}, 0, 0, SEARCHING_SYNC};
-	lanc[2] = {CAM3_LANC_SIG_IN, CAM3_LANC_CMD_OUT, micros(), false, false, {0}, {0}, 0, 0, SEARCHING_SYNC};
-	
-	for (int i = 0; i < 3; i++) {
-			pinMode(lanc[i].rxPin, INPUT_PULLUP);
+		
+	// initialize LANC signals
+	for (int i = 0; i < 2; i++) {
+			pinMode(lanc[i].rxPin, INPUT);
 			pinMode(lanc[i].txPin, OUTPUT);
 			digitalWrite(lanc[i].txPin, LOW);
 	}
-
+  
 	attachInterrupt(digitalPinToInterrupt(lanc[0].rxPin), lancTriggerISR0, FALLING);
 	attachInterrupt(digitalPinToInterrupt(lanc[1].rxPin), lancTriggerISR1, FALLING);
-	attachInterrupt(digitalPinToInterrupt(lanc[2].rxPin), lancTriggerISR2, FALLING);
-
+	
   // --- Application state ---
   activeCam     = -1;
   rxDataLen     = 0;
