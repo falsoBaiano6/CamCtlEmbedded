@@ -254,26 +254,25 @@ void queueLancCommand(uint8_t b0, uint8_t b1) {
     lancPacketComplete = false;
 }
 
-// Release all pan/tilt pins to HIGH-Z (INPUT, no pull-up)
+// Release all pan/tilt pins to LOW state
 void releaseAllPanTilt() {
   for (uint8_t i = 0; i < sizeof(allPanTiltPins); i++) {
-    pinMode(allPanTiltPins[i], INPUT);
+		pinMode(allPanTiltPins[i], OUTPUT);
+    digitalWrite(allPanTiltPins[i], LOW);
   }
 }
 
 // Release only the pan/tilt pins for one camera
 void releasePanTilt(uint8_t camIdx) {
-  pinMode(panLeftPin[camIdx],  INPUT);
-  pinMode(panRightPin[camIdx], INPUT);
-  pinMode(tiltUpPin[camIdx],   INPUT);
-  pinMode(tiltDownPin[camIdx], INPUT);
+  digitalWrite(panLeftPin[camIdx],  LOW);
+  digitalWrite(panRightPin[camIdx], LOW);
+  digitalWrite(tiltUpPin[camIdx],   LOW);
+  digitalWrite(tiltDownPin[camIdx], LOW);
 }
 
 // Drive one pan/tilt pin LOW (all others for that camera released first)
 void actuatePanTilt(uint8_t camIdx, uint8_t pin) {
-  releasePanTilt(camIdx);
-  pinMode(pin, OUTPUT);
-  digitalWrite(pin, LOW);
+  digitalWrite(pin, HIGH);
 }
 
 // Functions to check membership
@@ -697,8 +696,8 @@ void initHardware() {
   uint32_t t = millis();
   while (!Serial && (millis() - t < 5000));
 
-  // --- Pan/tilt pins: all HIGH-Z by default ---
-  releaseAllPanTilt();
+  // initialize PAN/TILT signals
+	releaseAllPanTilt();
 
 	lanc[0] = {CAM1_LANC_SIG_IN, CAM1_LANC_CMD_OUT, micros(), false, false, {0}, {0}, 0, 0, SEARCHING_SYNC};
 	lanc[1] = {CAM2_LANC_SIG_IN, CAM2_LANC_CMD_OUT, micros(), false, false, {0}, {0}, 0, 0, SEARCHING_SYNC};
