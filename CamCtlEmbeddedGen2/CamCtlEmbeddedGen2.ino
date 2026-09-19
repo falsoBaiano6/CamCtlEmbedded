@@ -150,12 +150,14 @@ struct MotionState {
     uint8_t camera;            // 0,1,2
     Axis axis;                 // PAN or TILT
     Direction direction;       // LEFT/RIGHT or UP/DOWN
+
     uint8_t speedPercent;      // 10..100
     uint16_t onTimeMs;         // ON duration inside 100ms frame
     uint16_t offCountdown;     // OFF scheduling countdown
+
     uint16_t deadTimeMs;       // neutral time before reversing
-    uint16_t onCountdown;      // ON scheduling countdown
     Direction pendingDirection;// direction after dead-time
+
     uint16_t onAccumulatedMs;  // continuous ON protection
 };
 
@@ -176,6 +178,9 @@ const uint8_t allPanTiltPins[] = {
   CAM2_PAN_LEFT, CAM2_PAN_RIGHT, CAM2_TILT_UP, CAM2_TILT_DOWN,
   CAM3_PAN_LEFT, CAM3_PAN_RIGHT, CAM3_TILT_UP, CAM3_TILT_DOWN
 };
+
+    digitalWrite(ssrPin[cam][axis][dir], HIGH);
+
 
 const uint8_t validCamValues[NUM_CAMERAS] = { cam1Id, cam2Id, cam3Id };
 #define NUM_COMMANDS 8
@@ -271,14 +276,17 @@ static uint8_t rxDataLen = 0;
 
 #define DEFAULT_PAN_TILT_SPEED_PCT 50
 
-uint8_t cameraPanTiltSpeed[3] = {DEFAULT_PAN_TILT_SPEED_PCT, DEFAULT_PAN_TILT_SPEED_PCT, DEFAULT_PAN_TILT_SPEED_PCT};  // default speeds
+uint8_t cameraSpeed[3] = {DEFAULT_PAN_TILT_SPEED_PCT, DEFAULT_PAN_TILT_SPEED_PCT, DEFAULT_PAN_TILT_SPEED_PCT};  // default speeds
 
 void setPanTiltSpeed(uint8_t cam, uint8_t percent) {
 	if (percent < MIN_PAN_TILT_DUTY_PCT) percent = MIN_PAN_TILT_DUTY_PCT;
 	if (percent > MAX_PAN_TILT_DUTY_PCT) percent = MAX_PAN_TILT_DUTY_PCT;
 
-	cameraPanTiltSpeed[cam] = percent;
-	motion.speedPercent = cameraPanTiltSpeed[cam];
+	cameraSpeed[cam] = percent;
+	if (motion.active && motion.camera == cam) {
+		motion.speedPercent = cameraSpeed[cam];
+		motion.onTimeMs = (motion.speedPercent * 100) / 100;
+	}
 }
 
 void tiltUp(int cam) {
@@ -299,7 +307,7 @@ void panRight(int cam) {
 
 void stopMotion() {
   motion.active = false;
-  turnSSR_OFF(motion.camera, motion.axis, motion.direction);
+  turnSSR_OFF(motion.camera, motion.axis);
 	motion.onAccumulatedMs = 0;
 }
 
@@ -328,9 +336,6 @@ void startMotion(uint8_t cam, Axis axis, Direction dir) {
 	motion.axis = axis;
 	motion.direction = dir;
 	motion.active = true;
-	motion.onTimeMs = (motion.speedPercent * 100) / 100; // set initial on-time value as speed % parameter  
-	motion.deadTimeMs = 100 - motion.onTimeMs;           // set initial off-time value as residual from speed %
-
 }
 
 // Release all pan/tilt pins to LOW state
@@ -357,7 +362,7 @@ void actuatePanTilt(uint8_t camIdx, uint8_t pin) {
 void turnSSR_ON(uint8_t cam, Axis axis, Direction dir) {
 	if(zoomState == ZOOM_IDLE) {
 		if(axis == PAN) {
-			if(dir == LEFT) { // PAN LEFT
+			if(DIR == LEFT) { // PAN LEFT
 				digitalWrite(panLeftPin[cam], HIGH);
 			}
 			else {            // PAN RIGHT 
@@ -365,7 +370,7 @@ void turnSSR_ON(uint8_t cam, Axis axis, Direction dir) {
 			}
 		}
 		else {
-			if(dir == UP) {   // TILT UP
+			if(DIR == UP) {   // TILT UP
 				digitalWrite(tiltUpPin[cam], HIGH);
 			}
 			else {						// TILT DOWN
@@ -375,9 +380,9 @@ void turnSSR_ON(uint8_t cam, Axis axis, Direction dir) {
 	}
 }
 
-void turnSSR_OFF(uint8_t cam, Axis axis, Direction dir) {
+void turnSSR_OFF(uint8_t cam, Axis axis) {
 		if(axis == PAN) {
-			if(dir == LEFT) { // PAN LEFT
+			if(DIR == LEFT) { // PAN LEFT
 				digitalWrite(panLeftPin[cam], LOW);
 			}
 			else {            // PAN RIGHT 
@@ -385,7 +390,7 @@ void turnSSR_OFF(uint8_t cam, Axis axis, Direction dir) {
 			}
 		}
 		else {
-			if(dir == UP) {   // TILT UP
+			if(DIR == UP) {   // TILT UP
 				digitalWrite(tiltUpPin[cam], LOW);
 			}
 			else {						// TILT DOWN
@@ -563,6 +568,7 @@ extern "C" void SysTick_Handler(void) {
     SysTick_ISR();   // your OFF countdown + dead-time logic
 }
 
+
 void SysTick_ISR() {
 	if (motion.deadTimeMs > 0) {
 		motion.deadTimeMs--;
@@ -577,7 +583,7 @@ void SysTick_ISR() {
 	if (motion.offCountdown > 0) {
 		motion.offCountdown--;
 		if (motion.offCountdown == 0) {
-				turnSSR_OFF(motion.camera, motion.axis, motion.direction);
+				turnSSR_OFF(motion.camera, motion.axis);
 		}
 	}
 }
@@ -792,7 +798,7 @@ void processFrame(const char* buf, uint8_t len) {
     case CMD_PAN_LEFT:
 			if(zoomState == ZOOM_IDLE) // don't actuate pan/tilt if zoom is active
 			{
-				panLeft(camIdx);
+				actuatePanTilt((uint8_t)camIdx, panLeftPin[camIdx]);
 			}
   		// Acknowledge received command
 			Serial.println(rxAckCmplt);
@@ -801,7 +807,7 @@ void processFrame(const char* buf, uint8_t len) {
     case CMD_PAN_RIGHT:
 			if(zoomState == ZOOM_IDLE) // don't actuate pan/tilt if zoom is active
 			{
-				panRight(camIdx);
+				actuatePanTilt((uint8_t)camIdx, panRightPin[camIdx]);
 			}
   		// Acknowledge received command
 			Serial.println(rxAckCmplt);
@@ -810,7 +816,7 @@ void processFrame(const char* buf, uint8_t len) {
     case CMD_TILT_UP:
 			if(zoomState == ZOOM_IDLE) // don't actuate pan/tilt if zoom is active
 			{
-				tiltUp(camIdx);
+				actuatePanTilt((uint8_t)camIdx, tiltUpPin[camIdx]);
 			}
   		// Acknowledge received command
 			Serial.println(rxAckCmplt);
@@ -819,7 +825,7 @@ void processFrame(const char* buf, uint8_t len) {
     case CMD_TILT_DOWN:
 			if(zoomState == ZOOM_IDLE) // don't actuate pan/tilt if zoom is active
 			{
-				tiltDown(camIdx);
+				actuatePanTilt((uint8_t)camIdx, tiltDownPin[camIdx]);
 			}
   		// Acknowledge received command
 			Serial.println(rxAckCmplt);
@@ -828,7 +834,7 @@ void processFrame(const char* buf, uint8_t len) {
     case CMD_PAN_STOP:
 			if(zoomState == ZOOM_IDLE) // don't actuate pan/tilt if zoom is active
 			{
-				stopMotion();
+				releasePanTilt((uint8_t)camIdx);
 			}
   		// Acknowledge received command
 			Serial.println(rxAckCmplt);
@@ -848,7 +854,7 @@ void processFrame(const char* buf, uint8_t len) {
       // Expect 2 more hex bytes in buf[2..3] and buf[4..5] (spaces optional)
       // Strip spaces to collect hex chars
 			// Only applies to CAM1 or CAM2
-			if(!motion.active)	{ // motion must be inactive to start zoom
+			if(motion.active)	{ // motion must be inactive to start zoom
 				processLancCmd(buf, len);				
 				lancCmdReceived = true;
 				zoomStart();
