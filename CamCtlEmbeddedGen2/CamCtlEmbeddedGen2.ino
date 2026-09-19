@@ -51,14 +51,13 @@ line and only listens to the status information transmitted by the camera. */
 #define cam3Id    '3'
 
 // ─── Command codes ─────────────
-#define CMD_PAN_LEFT    		'L'
-#define CMD_PAN_RIGHT   		'R'
-#define CMD_TILT_UP     		'U'
-#define CMD_TILT_DOWN   		'D'
-#define CMD_PAN_STOP    		'S'   // release all pan/tilt for active camera
-#define CMD_SET_PAN_SPEED		'T'		
-#define CMD_LANC        		'Z'
-#define CMD_LANC_STOP   		'Y'  
+#define CMD_PAN_LEFT    'L'
+#define CMD_PAN_RIGHT   'R'
+#define CMD_TILT_UP     'U'
+#define CMD_TILT_DOWN   'D'
+#define CMD_PAN_STOP    'S'   // release all pan/tilt for active camera
+#define CMD_LANC        'Z'
+#define CMD_LANC_STOP   'Y'  
 
 // ─── Pin assignments ─────────────────────────────────────────────────────────
 // CAM1 (full support -- wire CAM1 here)
@@ -106,64 +105,32 @@ line and only listens to the status information transmitted by the camera. */
 // Fastest: 28 1E
 
 // LANC timing constants at 9600 baud (in microseconds)
-const uint32_t BIT_TIME_US 						= 104;   // LANC bit time (~104 µs)
-const uint32_t HALF_BIT_TIME_US 			= 52;
-const uint32_t FRAME_SYNC_MIN_US 			= 5000;  // gap before byte 0 (~1 ms)
-const uint32_t PAN_TILT_PWM_PERIOD_US = 1E5;
+const uint32_t BIT_TIME_US = 104; // LANC bit time (~104 µs)
+const uint32_t HALF_BIT_TIME_US = 52;
+const uint32_t FRAME_SYNC_MIN_US = 5000;  // gap before byte 0 (~1 ms)
 
 // ─────────────────────────────────────────────────────────────
 // Per-Channel Lanc State
 // ─────────────────────────────────────────────────────────────
 struct LancChannel {
-	uint8_t rxPin;
-	uint8_t txPin;
+    uint8_t rxPin;
+    uint8_t txPin;
 
-	volatile uint32_t last_falling_edge;
-	volatile bool     active;        // selected camera
-	volatile bool     cmdPending;
+    volatile uint32_t last_falling_edge;
+    volatile bool     active;        // selected camera
+    volatile bool     cmdPending;
 
-	uint8_t txBuf[2];                // bytes 0–1 to inject
-	uint8_t rxBuf[8];                // bytes 0–7 readback
+    uint8_t txBuf[2];                // bytes 0–1 to inject
+    uint8_t rxBuf[8];                // bytes 0–7 readback
 
-	volatile uint8_t  state;
+    volatile uint8_t  state;
 
-	// Status read scaffolding (bytes 2–7)
-	volatile uint8_t statusByteIdx;  // 2..7
-	volatile uint8_t statusBitIdx;   // 0..9 (start+8+stop)
+    // Status read scaffolding (bytes 2–7)
+    volatile uint8_t statusByteIdx;  // 2..7
+    volatile uint8_t statusBitIdx;   // 0..9 (start+8+stop)
 };
 
 LancChannel lanc[3];
-enum Axis {
-	PAN = 0, TILT = 1
-};
-
-enum Direction {
-	NONE = 0,
-	LEFT, 
-	RIGHT,
-	UP,
-	DOWN 
-};
-
-struct MotionState {
-    bool active;               // motion running?
-    uint8_t camera;            // 0,1,2
-    Axis axis;                 // PAN or TILT
-    Direction direction;       // LEFT/RIGHT or UP/DOWN
-
-    uint8_t speedPercent;      // 10..100
-    uint16_t onTimeMs;         // ON duration inside 100ms frame
-    uint16_t offCountdown;     // OFF scheduling countdown
-
-    uint16_t deadTimeMs;       // neutral time before reversing
-    Direction pendingDirection;// direction after dead-time
-
-    uint16_t onAccumulatedMs;  // continuous ON protection
-};
-
-MotionState motion;
-
-FspTimer panTiltTimer;
 
 // ─── Pin lookup tables (index: 0=CAM1, 1=CAM2, 2=CAM3) ───────────────────────
 const uint8_t lancCmdPin[NUM_CAMERAS]  = { CAM1_LANC_CMD_OUT, CAM2_LANC_CMD_OUT, NULL_PIN };
@@ -179,12 +146,9 @@ const uint8_t allPanTiltPins[] = {
   CAM3_PAN_LEFT, CAM3_PAN_RIGHT, CAM3_TILT_UP, CAM3_TILT_DOWN
 };
 
-    digitalWrite(ssrPin[cam][axis][dir], HIGH);
-
-
 const uint8_t validCamValues[NUM_CAMERAS] = { cam1Id, cam2Id, cam3Id };
-#define NUM_COMMANDS 8
-const uint8_t validCmdValues[NUM_COMMANDS] = { CMD_PAN_LEFT, CMD_PAN_RIGHT, CMD_TILT_UP, CMD_TILT_DOWN, CMD_PAN_STOP, CMD_SET_PAN_SPEED, CMD_LANC, CMD_LANC_STOP }; 
+#define NUM_COMMANDS 7
+const uint8_t validCmdValues[NUM_COMMANDS] = { CMD_PAN_LEFT, CMD_PAN_RIGHT, CMD_TILT_UP, CMD_TILT_DOWN, CMD_PAN_STOP, CMD_LANC, CMD_LANC_STOP }; 
 volatile uint8_t lancActiveSigPin = CAM1_LANC_SIG_IN; // default = CAM1
 
 // ─────────────────────────────────────────────────────────────
@@ -193,29 +157,29 @@ volatile uint8_t lancActiveSigPin = CAM1_LANC_SIG_IN; // default = CAM1
 
 // ─── Lanc State (interrupt-driven, one camera active) ──────────────────
 enum LancState {
-	SEARCHING_SYNC,
-	BYTE0_START,
-	BYTE0_DATA,
-	BYTE0_STOP,
-	BYTE1_START,
-	BYTE1_DATA,
-	BYTE1_STOP
+    SEARCHING_SYNC,
+    BYTE0_START,
+    BYTE0_DATA,
+    BYTE0_STOP,
+    BYTE1_START,
+    BYTE1_DATA,
+    BYTE1_STOP
 };	
 // ─── Host message frame state (tight handshake -- 1-2 characters, 1 Ack) ──────────────────
 
 enum FrameState {
-	IDLE,
-	CID,
-	CMD,
-	DATA
+    IDLE,
+    CID,
+    CMD,
+    DATA
 };
 
 // ─── Zoom State ──────────────────
 
 enum ZoomState {
-	ZOOM_IDLE,
-	ZOOM_ACTIVE,
-	ZOOM_STOP
+    ZOOM_IDLE,
+    ZOOM_ACTIVE,
+		ZOOM_STOP
 };
 
 volatile ZoomState zoomState = ZOOM_IDLE;
@@ -255,149 +219,13 @@ volatile bool    lancCmdPending = false;
 // variables tracking the LANC start timing state
 volatile bool actionComplete = false;
 
-//FspTimer lancTimer; // For future reads of status bytes
-volatile uint16_t panTiltSpeedPct = 10;     // 10..90
-volatile uint16_t panTiltOnTimeMs;
-volatile uint16_t panTiltOffTimeMs;
+FspTimer lancTimer;
 
 // ─── Serial receive buffer ────────────────────────────────────────────────────
 #define RX_DATA_BUF_SIZE 8
 static char  rxDataBuf[RX_DATA_BUF_SIZE];
 static uint8_t rxDataBufIdx  = 0;
 static uint8_t rxDataLen = 0;
-
-
-// --- PAN/TILT functions ------------
-
-#define MOTION_TIMEOUT_MS 10000
-
-#define MAX_PAN_TILT_DUTY_PCT 90
-#define MIN_PAN_TILT_DUTY_PCT 10
-
-#define DEFAULT_PAN_TILT_SPEED_PCT 50
-
-uint8_t cameraSpeed[3] = {DEFAULT_PAN_TILT_SPEED_PCT, DEFAULT_PAN_TILT_SPEED_PCT, DEFAULT_PAN_TILT_SPEED_PCT};  // default speeds
-
-void setPanTiltSpeed(uint8_t cam, uint8_t percent) {
-	if (percent < MIN_PAN_TILT_DUTY_PCT) percent = MIN_PAN_TILT_DUTY_PCT;
-	if (percent > MAX_PAN_TILT_DUTY_PCT) percent = MAX_PAN_TILT_DUTY_PCT;
-
-	cameraSpeed[cam] = percent;
-	if (motion.active && motion.camera == cam) {
-		motion.speedPercent = cameraSpeed[cam];
-		motion.onTimeMs = (motion.speedPercent * 100) / 100;
-	}
-}
-
-void tiltUp(int cam) {
-  startMotion(cam, TILT, UP);
-}
-
-void tiltDown(int cam) {
-  startMotion(cam, TILT, DOWN);
-}
-
-void panLeft(int cam) {
-  startMotion(cam, PAN, LEFT);
-}
-
-void panRight(int cam) {
-  startMotion(cam, PAN, RIGHT);
-}
-
-void stopMotion() {
-  motion.active = false;
-  turnSSR_OFF(motion.camera, motion.axis);
-	motion.onAccumulatedMs = 0;
-}
-
-void startMotion(uint8_t cam, Axis axis, Direction dir) {
-	if (motion.active &&
-		(motion.camera != cam || motion.axis != axis)) {
-		// switching camera or axis → full stop + dead-time
-		stopMotion();
-		motion.deadTimeMs = 200;
-		motion.pendingDirection = dir;
-		motion.camera = cam;
-		motion.axis = axis;
-		return;
-	}
-
-	if (motion.active && motion.direction != dir) {
-		// switching direction only → dead-time
-		stopMotion();
-		motion.deadTimeMs = 200;
-		motion.pendingDirection = dir;
-		return;
-	}
-
-	// normal start
-	motion.camera = cam;
-	motion.axis = axis;
-	motion.direction = dir;
-	motion.active = true;
-}
-
-// Release all pan/tilt pins to LOW state
-void releaseAllPanTilt() {
-  for (uint8_t i = 0; i < sizeof(allPanTiltPins); i++) {
-		pinMode(allPanTiltPins[i], OUTPUT);
-    digitalWrite(allPanTiltPins[i], LOW);
-  }
-}
-
-// Release only the pan/tilt pins for one camera
-void releasePanTilt(uint8_t camIdx) {
-  digitalWrite(panLeftPin[camIdx],  LOW);
-  digitalWrite(panRightPin[camIdx], LOW);
-  digitalWrite(tiltUpPin[camIdx],   LOW);
-  digitalWrite(tiltDownPin[camIdx], LOW);
-}
-
-// Drive one pan/tilt pin LOW
-void actuatePanTilt(uint8_t camIdx, uint8_t pin) {
-  digitalWrite(pin, HIGH);
-}
-
-void turnSSR_ON(uint8_t cam, Axis axis, Direction dir) {
-	if(zoomState == ZOOM_IDLE) {
-		if(axis == PAN) {
-			if(DIR == LEFT) { // PAN LEFT
-				digitalWrite(panLeftPin[cam], HIGH);
-			}
-			else {            // PAN RIGHT 
-				digitalWrite(panRightPin[cam], HIGH);
-			}
-		}
-		else {
-			if(DIR == UP) {   // TILT UP
-				digitalWrite(tiltUpPin[cam], HIGH);
-			}
-			else {						// TILT DOWN
-				digitalWrite(tiltDownPin[cam], HIGH);
-			}						
-		}
-	}
-}
-
-void turnSSR_OFF(uint8_t cam, Axis axis) {
-		if(axis == PAN) {
-			if(DIR == LEFT) { // PAN LEFT
-				digitalWrite(panLeftPin[cam], LOW);
-			}
-			else {            // PAN RIGHT 
-				digitalWrite(panRightPin[cam], LOW);
-			}
-		}
-		else {
-			if(DIR == UP) {   // TILT UP
-				digitalWrite(tiltUpPin[cam], LOW);
-			}
-			else {						// TILT DOWN
-				digitalWrite(tiltDownPin[cam], LOW);
-			}						
-		}
-}
 
 // ─────────────────────────────────────────────────────────────
 // Select active channel (called by host command logic)
@@ -424,6 +252,27 @@ void queueLancCommand(uint8_t b0, uint8_t b1) {
     lanc[activeCam].txBuf[1] = b1;
     lanc[activeCam].cmdPending = true;
     lancPacketComplete = false;
+}
+
+// Release all pan/tilt pins to LOW state
+void releaseAllPanTilt() {
+  for (uint8_t i = 0; i < sizeof(allPanTiltPins); i++) {
+		pinMode(allPanTiltPins[i], OUTPUT);
+    digitalWrite(allPanTiltPins[i], LOW);
+  }
+}
+
+// Release only the pan/tilt pins for one camera
+void releasePanTilt(uint8_t camIdx) {
+  digitalWrite(panLeftPin[camIdx],  LOW);
+  digitalWrite(panRightPin[camIdx], LOW);
+  digitalWrite(tiltUpPin[camIdx],   LOW);
+  digitalWrite(tiltDownPin[camIdx], LOW);
+}
+
+// Drive one pan/tilt pin LOW (all others for that camera released first)
+void actuatePanTilt(uint8_t camIdx, uint8_t pin) {
+  digitalWrite(pin, HIGH);
 }
 
 // Functions to check membership
@@ -466,26 +315,7 @@ void processLancCmd(const char* buf, uint8_t len) {
   b2 = (uint8_t)strtol(temp2, NULL, 16);
 }
 
-void processSetPanTiltSpeedCmd(const char* buf, uint8_t len, uint8_t cam) {
-	
-  // Expect 2 more hex bytes in buf[2..3]
-  char str[3] = { 0 };
-  uint8_t hi = 2;
-  uint8_t hIdx = 0;
-  while (hi < len && hIdx < 4) {
-  	if (buf[hi] != ' ') str[hIdx++] = buf[hi];
-  	hi++;
-  }
-  if (hIdx < 2) { 
-  	Serial.println("ERR:SPEED_DATA");
-  }
-  
-  char temp1[3] = { str[0], str[1], '\0' };
-  uint8_t data = (uint8_t)strtol(temp1, NULL, 16);
-	
-	setPanTiltSpeed(cam, data);
-	
-}
+
 
 // ─────────────────────────────────────────────────────────────
 // Public API: set continuous zoom state
@@ -496,6 +326,11 @@ void zoomIdle()		{ zoomState = ZOOM_IDLE; }
 
 
 // ─── ISRs ─────────────────────────────────────────────────────────────────
+
+void testISR() {
+    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+}
+
 // ─────────────────────────────────────────────────────────────
 // LANC edge ISR: frame sync + byte start sync
 // Called on every falling edge of the LANC bus
@@ -539,55 +374,9 @@ void lancTriggerISR(int ch) {
 	}	
 }
 
-// Attach External ISRs
+// Attach ISRs
 void lancTriggerISR0() { lancTriggerISR(0); }
 void lancTriggerISR1() { lancTriggerISR(1); }
-
-// ─────────────────────────────────────────────────────────────
-// Motion frame (100ms)
-// ─────────────────────────────────────────────────────────────
-void panTiltTimer_ISR(timer_callback_args_t *p_args) {
-	if (!motion.active || motion.deadTimeMs > 0)
-		return;
-
-	turnSSR_ON(motion.camera, motion.axis, motion.direction);
-
-	motion.offCountdown = motion.onTimeMs;
-	motion.onAccumulatedMs += 100;
-
-  // Safety: limit continuous ON time
-	if (motion.onAccumulatedMs > MOTION_TIMEOUT_MS) {
-		stopMotion();
-	}
-}
-
-// ─────────────────────────────────────────────────────────────
-// SysTick timer (1ms)
-// ─────────────────────────────────────────────────────────────
-extern "C" void SysTick_Handler(void) {
-    SysTick_ISR();   // your OFF countdown + dead-time logic
-}
-
-
-void SysTick_ISR() {
-	if (motion.deadTimeMs > 0) {
-		motion.deadTimeMs--;
-		if (motion.deadTimeMs == 0 && motion.pendingDirection != NONE) {
-				motion.direction = motion.pendingDirection;
-				motion.pendingDirection = NONE;
-				motion.active = true;
-		}
-		return;
-	}
-
-	if (motion.offCountdown > 0) {
-		motion.offCountdown--;
-		if (motion.offCountdown == 0) {
-				turnSSR_OFF(motion.camera, motion.axis);
-		}
-	}
-}
-
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -836,15 +625,8 @@ void processFrame(const char* buf, uint8_t len) {
 			{
 				releasePanTilt((uint8_t)camIdx);
 			}
-  		// Acknowledge received command
-			Serial.println(rxAckCmplt);
-      break;
-
-    case CMD_SET_PAN_SPEED:
-			if(zoomState == ZOOM_IDLE) // don't set pan speed if zoom is active
-			{
-				processSetPanTiltSpeedCmd(buf, len, (uint8_t)camIdx);
-			}
+		  // For safety, terminate Zoom in case it's still active
+			zoomIdle();
   		// Acknowledge received command
 			Serial.println(rxAckCmplt);
       break;
@@ -854,11 +636,9 @@ void processFrame(const char* buf, uint8_t len) {
       // Expect 2 more hex bytes in buf[2..3] and buf[4..5] (spaces optional)
       // Strip spaces to collect hex chars
 			// Only applies to CAM1 or CAM2
-			if(motion.active)	{ // motion must be inactive to start zoom
-				processLancCmd(buf, len);				
-				lancCmdReceived = true;
-				zoomStart();
-			}
+			processLancCmd(buf, len);				
+			lancCmdReceived = true;
+			zoomStart();
 			// Acknowledge received command
 			Serial.println(rxAckCmplt);
       break;
@@ -917,15 +697,10 @@ void initHardware() {
   while (!Serial && (millis() - t < 5000));
 
   // initialize PAN/TILT signals
-
-	initPanTilt();
+	releaseAllPanTilt();
 
 	lanc[0] = {CAM1_LANC_SIG_IN, CAM1_LANC_CMD_OUT, micros(), false, false, {0}, {0}, 0, 0, SEARCHING_SYNC};
 	lanc[1] = {CAM2_LANC_SIG_IN, CAM2_LANC_CMD_OUT, micros(), false, false, {0}, {0}, 0, 0, SEARCHING_SYNC};
-	
-  setupPanTiltGPT();
-	setupSysTick1ms();
-
 		
 	// initialize LANC signals
 	for (int i = 0; i < 2; i++) {
@@ -936,7 +711,6 @@ void initHardware() {
   
 	attachInterrupt(digitalPinToInterrupt(lanc[0].rxPin), lancTriggerISR0, FALLING);
 	attachInterrupt(digitalPinToInterrupt(lanc[1].rxPin), lancTriggerISR1, FALLING);
-	
 	
   // --- Application state ---
   activeCam     = -1;
@@ -954,45 +728,6 @@ void initHardware() {
       }
     }
   }
-}
-
-// Release all pan/tilt pins to LOW state
-void initPanTilt() {
-  for (uint8_t i = 0; i < sizeof(allPanTiltPins); i++) {
-		pinMode(allPanTiltPins[i], OUTPUT);
-    digitalWrite(allPanTiltPins[i], LOW);
-		for (uint8_t i = 0; i < 3; i++) {
-			setPanTiltSpeed(i, DEFAULT_PAN_TILT_SPEED_PCT);
-		}
-  }
-}
-
-
-void setupSysTick1ms() {
-    SysTick_Config(SystemCoreClock / 1000);   // 1 ms tick
-}
-
-bool setupPanTiltGPT() {
-    uint8_t type = GPT_TIMER;
-    int8_t channel = FspTimer::get_available_timer(type);
-    if (channel < 0) return false;
-
-    // 10.0f Hz → period = 100 ms
-    if (!panTiltTimer.begin(TIMER_MODE_PERIODIC,
-                            type,
-                            channel,
-                            10.0f,          // rate in Hz
-                            0.0f,           // duty (unused for periodic)
-                            panTiltTimer_ISR,
-                            nullptr)) {
-        return false;
-    }
-
-    if (!panTiltTimer.setup_overflow_irq()) return false;
-    if (!panTiltTimer.open()) return false;
-    if (!panTiltTimer.start()) return false;
-
-    return true;
 }
 
 void flushSerialBuffer() {
