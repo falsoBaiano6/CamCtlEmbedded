@@ -60,7 +60,7 @@ line and only listens to the status information transmitted by the camera. */
 #define CMD_LANC_STOP   'Y'  
 
 // ─── Pin assignments ─────────────────────────────────────────────────────────
-// CAM1 (full support -- wire CAM1 here)
+// CAM1 (full support)
 #define CAM1_LANC_CMD_OUT   5
 #define CAM1_LANC_SIG_IN   18
 #define CAM1_PAN_LEFT      10
@@ -68,20 +68,20 @@ line and only listens to the status information transmitted by the camera. */
 #define CAM1_TILT_DOWN     12
 #define CAM1_TILT_UP       13
 
-// CAM2 (full support -- wire CAM3 here)
-#define CAM2_LANC_CMD_OUT   6
-#define CAM2_LANC_SIG_IN   16
-#define CAM2_PAN_LEFT      17
-#define CAM2_PAN_RIGHT      7
-#define CAM2_TILT_DOWN      8
-#define CAM2_TILT_UP       15
+// CAM2 (no zoom support) CAM3 on Schematic
+#define CAM2_PAN_LEFT       2 
+#define CAM2_PAN_RIGHT      3
+#define CAM2_TILT_DOWN      4
+#define CAM2_TILT_UP       19
 
-// CAM3 (no zoom support -- wire CAM2 here)
-#define CAM3_PAN_LEFT       2 
-#define CAM3_PAN_RIGHT      3
-#define CAM3_TILT_DOWN      4
-#define CAM3_TILT_UP       19
 
+// CAM3 (full support) CAM2 on Schematic
+#define CAM3_LANC_CMD_OUT   6
+#define CAM3_LANC_SIG_IN   16
+#define CAM3_PAN_LEFT      17
+#define CAM3_PAN_RIGHT      7
+#define CAM3_TILT_DOWN      8
+#define CAM3_TILT_UP       15
 #define NUM_CAMERAS         3
 #define NULL_PIN           -1
 
@@ -133,8 +133,8 @@ struct LancChannel {
 LancChannel lanc[3];
 
 // ─── Pin lookup tables (index: 0=CAM1, 1=CAM2, 2=CAM3) ───────────────────────
-const uint8_t lancCmdPin[NUM_CAMERAS]  = { CAM1_LANC_CMD_OUT, CAM2_LANC_CMD_OUT, NULL_PIN };
-const uint8_t lancSigPin[NUM_CAMERAS]  = { CAM1_LANC_SIG_IN,  CAM2_LANC_SIG_IN, NULL_PIN };
+const uint8_t lancCmdPin[NUM_CAMERAS]  = { CAM1_LANC_CMD_OUT, NULL_PIN, CAM3_LANC_CMD_OUT };
+const uint8_t lancSigPin[NUM_CAMERAS]  = { CAM1_LANC_SIG_IN,  NULL_PIN, CAM3_LANC_SIG_IN };
 const uint8_t panLeftPin[NUM_CAMERAS]  = { CAM1_PAN_LEFT,  CAM2_PAN_LEFT,  CAM3_PAN_LEFT  };
 const uint8_t panRightPin[NUM_CAMERAS] = { CAM1_PAN_RIGHT, CAM2_PAN_RIGHT, CAM3_PAN_RIGHT };
 const uint8_t tiltUpPin[NUM_CAMERAS]   = { CAM1_TILT_UP,   CAM2_TILT_UP,   CAM3_TILT_UP   };
@@ -700,17 +700,17 @@ void initHardware() {
 	releaseAllPanTilt();
 
 	lanc[0] = {CAM1_LANC_SIG_IN, CAM1_LANC_CMD_OUT, micros(), false, false, {0}, {0}, 0, 0, SEARCHING_SYNC};
-	lanc[1] = {CAM2_LANC_SIG_IN, CAM2_LANC_CMD_OUT, micros(), false, false, {0}, {0}, 0, 0, SEARCHING_SYNC};
+	lanc[2] = {CAM3_LANC_SIG_IN, CAM3_LANC_CMD_OUT, micros(), false, false, {0}, {0}, 0, 0, SEARCHING_SYNC};
 		
 	// initialize LANC signals
-	for (int i = 0; i < 2; i++) {
+	for (int i = 0; i < 3; i++) {
 			pinMode(lanc[i].rxPin, INPUT);
 			pinMode(lanc[i].txPin, OUTPUT);
 			digitalWrite(lanc[i].txPin, LOW);
 	}
   
 	attachInterrupt(digitalPinToInterrupt(lanc[0].rxPin), lancTriggerISR0, FALLING);
-	attachInterrupt(digitalPinToInterrupt(lanc[1].rxPin), lancTriggerISR1, FALLING);
+	attachInterrupt(digitalPinToInterrupt(lanc[2].rxPin), lancTriggerISR1, FALLING);
 	
   // --- Application state ---
   activeCam     = -1;
