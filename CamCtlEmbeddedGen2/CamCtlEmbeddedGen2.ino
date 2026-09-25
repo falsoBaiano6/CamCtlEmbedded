@@ -60,19 +60,21 @@ line and only listens to the status information transmitted by the camera. */
 #define CMD_LANC_STOP   'Y'  
 
 // ─── Pin assignments ─────────────────────────────────────────────────────────
+// (Pins for TILT_UP and TILT_DOWN are swapped from what's on the schematic)
+
 // CAM1 (full support)
 #define CAM1_LANC_CMD_OUT   5
 #define CAM1_LANC_SIG_IN   18
 #define CAM1_PAN_LEFT      10
 #define CAM1_PAN_RIGHT     11
-#define CAM1_TILT_DOWN     12
-#define CAM1_TILT_UP       13
+#define CAM1_TILT_DOWN     13
+#define CAM1_TILT_UP       12
 
 // CAM2 (no zoom support) CAM3 on Schematic
 #define CAM2_PAN_LEFT       2 
 #define CAM2_PAN_RIGHT      3
-#define CAM2_TILT_DOWN      4
-#define CAM2_TILT_UP       19
+#define CAM2_TILT_DOWN     19
+#define CAM2_TILT_UP        4
 
 
 // CAM3 (full support) CAM2 on Schematic
@@ -80,8 +82,8 @@ line and only listens to the status information transmitted by the camera. */
 #define CAM3_LANC_SIG_IN   16
 #define CAM3_PAN_LEFT      17
 #define CAM3_PAN_RIGHT      7
-#define CAM3_TILT_DOWN      8
-#define CAM3_TILT_UP       15
+#define CAM3_TILT_DOWN     15 
+#define CAM3_TILT_UP        8
 #define NUM_CAMERAS         3
 #define NULL_PIN           -1
 
@@ -376,7 +378,7 @@ void lancTriggerISR(int ch) {
 
 // Attach ISRs
 void lancTriggerISR0() { lancTriggerISR(0); }
-void lancTriggerISR1() { lancTriggerISR(1); }
+void lancTriggerISR2() { lancTriggerISR(2); }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -710,7 +712,7 @@ void initHardware() {
 	}
   
 	attachInterrupt(digitalPinToInterrupt(lanc[0].rxPin), lancTriggerISR0, FALLING);
-	attachInterrupt(digitalPinToInterrupt(lanc[2].rxPin), lancTriggerISR1, FALLING);
+	attachInterrupt(digitalPinToInterrupt(lanc[2].rxPin), lancTriggerISR2, FALLING);
 	
   // --- Application state ---
   activeCam     = -1;
